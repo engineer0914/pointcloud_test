@@ -1,0 +1,31 @@
+device:
+  serial_number: '327122072783'
+color:
+  width: 640
+  height: 480
+  fx: 606.1939697265625
+  fy: 606.0857543945312
+  cx: 329.0955810546875
+  cy: 247.07073974609375
+  model: distortion.inverse_brown_conrady
+  coeffs:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+depth:
+  width: 640
+  height: 480
+  fx: 385.48712158203125
+  fy: 385.48712158203125
+  cx: 325.4142761230469
+  cy: 242.95050048828125
+  model: distortion.brown_conrady
+  coeffs:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  depth_scale: 0.0010000000474974513
