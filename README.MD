@@ -128,3 +128,19 @@ component_info
 
 ---
 
+
+
+1. create_valid_depth_mask
+2. apply_depth_median_filter
+3. create_near_object_seed_mask
+
+4. convert_to_hsv
+5. create_duplo_hsv_mask
+
+6. clean_binary_mask
+7. create_fusion_seed_mask
+
+8. create_fusion_candidate_mask
+9. refine_candidate_mask
+10. extract_object_components
+11. analyze_object_basic

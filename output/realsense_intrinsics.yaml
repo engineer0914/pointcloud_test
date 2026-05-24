@@ -17,6 +17,22 @@ color:
 depth:
   width: 640
   height: 480
+  fx: 606.1939697265625
+  fy: 606.0857543945312
+  cx: 329.0955810546875
+  cy: 247.07073974609375
+  model: distortion.inverse_brown_conrady
+  coeffs:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  depth_scale: 0.0010000000474974513
+  aligned_to: color
+raw_depth_stream:
+  width: 640
+  height: 480
   fx: 385.48712158203125
   fy: 385.48712158203125
   cx: 325.4142761230469
@@ -28,4 +44,18 @@ depth:
   - 0.0
   - 0.0
   - 0.0
-  depth_scale: 0.0010000000474974513
+depth_filter:
+  use_realsense_filter: true
+  use_decimation: false
+  decimation_magnitude: 2
+  use_spatial: true
+  spatial_magnitude: 2
+  spatial_smooth_alpha: 0.5
+  spatial_smooth_delta: 20.0
+  spatial_holes_fill: 0
+  use_temporal: true
+  temporal_smooth_alpha: 0.4
+  temporal_smooth_delta: 20.0
+  temporal_persistency_index: 3
+  use_hole_filling: false
+  hole_filling_mode: 1
