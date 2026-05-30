@@ -1,2 +1,5 @@
 yolo_models/old_one
 outputs
+bus.jpg
+runs
+yolov8n-seg.pt
