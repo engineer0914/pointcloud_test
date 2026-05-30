@@ -31,3 +31,29 @@ D435i/f depth 획득
 
 ---
 
+
+
+
+
+
+# 관련 내용
+
+### **PCL 노말 벡터 추정**
+
+https://pcl.readthedocs.io/projects/tutorials/en/latest/normal_estimation.html#normal-estimation
+
+### **FPFH 설명**
+
+https://velog.io/@harms/Point-Registration-PFH-FPFH-%EC%95%8C%EA%B3%A0%EB%A6%AC%EC%A6%98
+
+### **CVAT 욜로 툴**
+
+https://github.com/cvat-ai/cvat
+
+### **O3D 라이브러리 도큐먼트**
+
+https://www.open3d.org/docs/release/
+
+### **OPENCV 라이브러리 도큐먼트**
+
+https://docs.opencv.org/4.x/
