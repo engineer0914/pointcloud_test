@@ -149,5 +149,3 @@ def VISUALIZE_COLOR_AND_DEPTH(color_img_bgr, depth_img):
 3. 옆면 정보 포함한 6D
 
 ## **조립체**
-
-
