@@ -125,3 +125,95 @@ def VISUALIZE_COLOR_AND_DEPTH(color_img_bgr, depth_img):
 
 
 
+### 시각화 대비용 함수
+def compare_depth(color_filtered, depth_filtered_before, depth_filtered_after):
+    # 글로벌 변수 - 카메라 원본 이미지
+        # color_img_bgr
+        # depth_img
+
+    # 글로벌 변수 - 처리 완료된 각각의 컬러와 뎁스 저장
+        # color_filtered
+        # depth_filtered
+
+    # 비율에 맞춰서 이미지 비율 계산
+    width = 18
+    height = width * (3 / 8)
+    figsize = (width, height)
+
+    # 1행 3열 figsize에 맞춰서 설정
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    # 컬러
+    vis_color_img = cv2.cvtColor(color_filtered, cv2.COLOR_BGR2RGB)
+    axes[0].imshow(vis_color_img)
+    axes[0].set_title("VISUALIZED COLOR (BGR -> RGB)")
+    axes[0].axis("off")
+
+    # 뎁스 비포
+    vis_depth_img, depth_range = depth_dynamic_colorization(depth_filtered_before)
+    axes[1].imshow(vis_depth_img)
+    axes[1].set_title(
+        f"Dynamic VISUALIZED DEPTH [before]\n"
+        f"Range: {depth_range[0]:.1f} ~ {depth_range[1]:.1f} [mm]"
+    )
+    axes[1].axis("off")
+
+    # 뎁스 애프터
+    vis_depth_img, depth_range = depth_dynamic_colorization(depth_filtered_after)
+    axes[2].imshow(vis_depth_img)
+    axes[2].set_title(
+        f"Dynamic VISUALIZED DEPTH [after]\n"
+        f"Range: {depth_range[0]:.1f} ~ {depth_range[1]:.1f} [mm]"
+    )
+    axes[2].axis("off")
+
+    # 시각화
+    plt.tight_layout()
+    plt.show()
+
+
+def compare_color(color_filtered_before, color_filtered_after, depth_filtered):
+    # 글로벌 변수 - 카메라 원본 이미지
+        # color_img_bgr
+        # depth_img
+
+    # 글로벌 변수 - 처리 완료된 각각의 컬러와 뎁스 저장
+        # color_filtered
+        # depth_filtered
+
+    # 비율에 맞춰서 이미지 비율 계산
+    width = 18
+    height = width * (3 / 8)
+    figsize = (width, height)
+
+    # 1행 3열 figsize에 맞춰서 설정
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    # 컬러 비포
+    vis_color_img = cv2.cvtColor(color_filtered_before, cv2.COLOR_BGR2RGB)
+    axes[0].imshow(vis_color_img)
+    axes[0].set_title("VISUALIZED COLOR [before] (BGR -> RGB)")
+    axes[0].axis("off")
+
+    # 컬러 애프터
+    vis_color_img = cv2.cvtColor(color_filtered_after, cv2.COLOR_BGR2RGB)
+    axes[1].imshow(vis_color_img)
+    axes[1].set_title("VISUALIZED COLOR [after] (BGR -> RGB)")
+    axes[1].axis("off")
+
+    # 뎁스
+    vis_depth_img, depth_range = depth_dynamic_colorization(depth_filtered)
+    axes[2].imshow(vis_depth_img)
+    axes[2].set_title(
+        f"Dynamic VISUALIZED DEPTH\n"
+        f"Range: {depth_range[0]:.1f} ~ {depth_range[1]:.1f} [mm]"
+    )
+    axes[2].axis("off")
+
+    # 시각화
+    plt.tight_layout()
+    plt.show()
+
+
+
+    
