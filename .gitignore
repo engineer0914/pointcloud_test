@@ -1,8 +1,8 @@
-yolo_models/old_one
-outputs
+yolo_models/old_one/
+outputs/
 bus.jpg
-runs
+runs/
 yolov8n-seg.pt
-duplo
+duplo/
 
 
