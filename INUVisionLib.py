@@ -1,19 +1,23 @@
 import os
 import yaml
+import pprint
+import glob
+import cv2
+
+import torch
+import open3d as o3d
+from sklearn.cluster import DBSCAN
+from ultralytics import YOLO
+
 import numpy as np
 import cv2
 import pyrealsense2 as rs
 import matplotlib.pyplot as plt
-import pprint
-import open3d as o3d
-from sklearn.cluster import DBSCAN
-from ultralytics import YOLO
-import torch
 
 
-# ==========================================
-# 🎯 카메라 상황별 맞춤 설정 (Profiles)
-# ==========================================
+
+# 카메라 설정 함수들
+
 CAMERA_PROFILES = {
     # 1. 바닥(Floor) 모드: RANSAC 평면 검출용 (넓고 강하게)
     "floor": {
@@ -58,8 +62,6 @@ CAMERA_PROFILES = {
     }
 }
 
-# 카메라 설정 함수들
-
 def get_realsense_ids():
     """
     연결된 모든 리얼센스 카메라의 이름과 시리얼 번호(ID)를 딕셔너리 형태로 반환합니다.
@@ -100,6 +102,9 @@ def configure_realsense(
     
     pipeline = rs.pipeline()
     config = rs.config()
+
+    if serial_number:
+        config.enable_device(serial_number)
 
     # 1. 스트림 해상도 설정
     config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
@@ -318,6 +323,37 @@ def get_aligned_frames_with_units(
 
     return depth_image, color_image, depth_scale_used, debug_info
 
+def get_aligned_frames(pipeline, align, temp_filter, thres_filter, apply_filter=True):
+    # """
+    # 카메라로부터 프레임을 받아 컬러 영상에 정렬된(Aligned) 뎁스 영상을 반환합니다.
+    # """
+    # # frames = pipeline.wait_for_frames()
+    # # aligned_frames = align.process(frames)
+    
+    # aligned_depth_frame = aligned_frames.get_depth_frame()
+    # color_frame = aligned_frames.get_color_frame()
+    
+    # if not aligned_depth_frame or not color_frame:
+    #     return None, None
+
+    # # 요청에 따라 포스트 프로세싱 필터 적용
+    # if apply_filter:
+    #     # 💡 보통 필요 없는 배경/가까운 물체를 먼저 날리고(Threshold) -> 잔상을 부드럽게(Temporal) 처리합니다.
+    #     aligned_depth_frame = thres_filter.process(aligned_depth_frame)
+    #     aligned_depth_frame = temp_filter.process(aligned_depth_frame)
+
+    # depth_image = np.asanyarray(aligned_depth_frame.get_data())
+    # color_image = np.asanyarray(color_frame.get_data())
+
+    # # 핵심: 실제 frame 기준 depth units 사용
+    # try:
+    #     frame_depth_units = aligned_depth_frame.as_depth_frame().get_units()
+    # except Exception:
+    #     frame_depth_units = None
+    
+    # return depth_image, color_image
+    return
+
 def make_depth_colormap_meters(
     depth_img,
     depth_scale,
@@ -348,6 +384,7 @@ def make_depth_colormap_meters(
     depth_colormap_rgb[~valid] = 0
 
     return depth_colormap_rgb, depth_m
+
 
 
 # 조립체 분석용 함수들
@@ -1163,6 +1200,7 @@ def visualize_contour_pca_axes(
 
 
 # 포인트 클라우드 함수
+
 def refine_2d_mask_with_hull(projected_mask_01, color_bgr):
     """
     파먹히고 조각난 2D 투영 마스크(0 or 1)를 Convex Hull과 모폴로지 연산을 
@@ -1197,24 +1235,6 @@ def refine_2d_mask_with_hull(projected_mask_01, color_bgr):
     # 7. 완벽해진 마스크로 원본 컬러 이미지 다시 커팅
     final_cut_color = cv2.bitwise_and(color_bgr, color_bgr, mask=refined_mask_01)
     
-    return refined_mask_01, final_cut_color
-
-def refine_2d_mask_with_hull(projected_mask_01, color_bgr):
-    # [함수 1] 조각난 2D 마스크를 Convex Hull로 복원
-    mask_255 = (projected_mask_01 * 255).astype(np.uint8)
-    kernel = np.ones((7, 7), np.uint8)
-    closed_mask = cv2.morphologyEx(mask_255, cv2.MORPH_CLOSE, kernel)
-    
-    contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    refined_mask = np.zeros_like(mask_255)
-    
-    for cnt in contours:
-        if cv2.contourArea(cnt) > 200:
-            hull = cv2.convexHull(cnt)
-            cv2.drawContours(refined_mask, [hull], 0, 255, -1)
-            
-    refined_mask_01 = (refined_mask / 255).astype(np.uint8)
-    final_cut_color = cv2.bitwise_and(color_bgr, color_bgr, mask=refined_mask_01)
     return refined_mask_01, final_cut_color
 
 def create_floor_anchored_3d_box_with_axes(box_2d, intrinsics, plane_normal, d, max_h, color, axis_size=0.03):
@@ -1309,11 +1329,8 @@ def create_floor_anchored_3d_box(box_2d, intrinsics, plane_normal, d, max_h, col
     return line_set
 
 
+
 # 컨트롤 실행부 함수들
-
-
-
-
 def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=30, visualize=False):
     """
     특정 리얼센스 카메라를 지정한 모드로 켜서 예열한 뒤, 핵심 비전 데이터를 추출하는 함수.
@@ -1356,17 +1373,15 @@ def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=30, visua
             print(f"🔥 센서 안정화 중... ({warmup_frames} 프레임 대기)")
             for _ in range(warmup_frames):
                 pipeline.wait_for_frames()
-                
-        # 4. 프레임 획득 (안정성을 위해 2번 돌고 마지막 프레임 사용)
-        for _ in range(2):
-            depth_img, color_img, depth_scale, debug_info = get_aligned_frames_with_units(
-                pipeline=pipeline,
-                align=align,
-                temp_filter=temp_filter,
-                thres_filter=thres_filter,
-                profile_depth_units=profile_depth_units,
-                apply_filter=True
-            )
+
+        depth_img, color_img, depth_scale, debug_info = get_aligned_frames_with_units(
+            pipeline=pipeline,
+            align=align,
+            temp_filter=temp_filter,
+            thres_filter=thres_filter,
+            profile_depth_units=profile_depth_units,
+            apply_filter=True
+        )
             
         intrinsics = get_aligned_intrinsics(pipeline)
         
@@ -1403,6 +1418,144 @@ def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=30, visua
     color_img_rgb = cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB) if color_img is not None else None
         
     return color_img_rgb, depth_img, intrinsics, depth_scale
+
+
+def load_rgb_calibration_from_folder(
+    calib_folder,
+    yaml_name=None,
+    alpha=0,
+    make_undistort_map=True
+):
+    """
+    OpenCV RGB 캘리브레이션 YAML을 폴더 경로에서 불러오는 함수.
+
+    Parameters
+    ----------
+    calib_folder : str
+        YAML 파일이 들어있는 폴더 경로.
+    yaml_name : str or None
+        특정 YAML 파일명을 지정하고 싶을 때 사용.
+        None이면 폴더 안의 .yaml 또는 .yml 파일 중 첫 번째를 사용.
+    alpha : float
+        cv2.getOptimalNewCameraMatrix의 alpha.
+        0: 검은 영역 최소화 / crop 느낌
+        1: 시야 최대 보존
+    make_undistort_map : bool
+        True이면 remap용 map1, map2까지 생성.
+
+    Returns
+    -------
+    calib : dict
+        {
+            "image_width": int,
+            "image_height": int,
+            "checkerboard_inner_corners": dict,
+            "square_size_mm": float,
+            "rms_reprojection_error": float,
+            "K": np.ndarray,
+            "D": np.ndarray,
+            "new_K": np.ndarray or None,
+            "roi": tuple or None,
+            "map1": np.ndarray or None,
+            "map2": np.ndarray or None,
+            "yaml_path": str
+        }
+    """
+
+    calib_folder = os.path.abspath(calib_folder)
+
+    if not os.path.isdir(calib_folder):
+        raise FileNotFoundError(f"폴더가 없습니다: {calib_folder}")
+
+    # YAML 파일 찾기
+    if yaml_name is not None:
+        yaml_path = os.path.join(calib_folder, yaml_name)
+        if not os.path.isfile(yaml_path):
+            raise FileNotFoundError(f"YAML 파일이 없습니다: {yaml_path}")
+    else:
+        yaml_files = sorted(
+            glob.glob(os.path.join(calib_folder, "*.yaml")) +
+            glob.glob(os.path.join(calib_folder, "*.yml"))
+        )
+
+        if len(yaml_files) == 0:
+            raise FileNotFoundError(f"YAML 파일을 찾지 못했습니다: {calib_folder}")
+
+        yaml_path = yaml_files[0]
+
+    # YAML 로드
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    # 필수 값 확인
+    required_keys = [
+        "image_width",
+        "image_height",
+        "camera_matrix",
+        "dist_coeffs"
+    ]
+
+    for key in required_keys:
+        if key not in data:
+            raise KeyError(f"YAML에 '{key}' 항목이 없습니다: {yaml_path}")
+
+    w = int(data["image_width"])
+    h = int(data["image_height"])
+
+    K = np.array(data["camera_matrix"], dtype=np.float64)
+    D = np.array(data["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
+
+    new_K = None
+    roi = None
+    map1 = None
+    map2 = None
+
+    if make_undistort_map:
+        new_K, roi = cv2.getOptimalNewCameraMatrix(
+            K,
+            D,
+            (w, h),
+            alpha,
+            (w, h)
+        )
+
+        map1, map2 = cv2.initUndistortRectifyMap(
+            K,
+            D,
+            None,
+            new_K,
+            (w, h),
+            cv2.CV_32FC1
+        )
+
+    calib = {
+        "image_width": w,
+        "image_height": h,
+        "checkerboard_inner_corners": data.get("checkerboard_inner_corners", None),
+        "square_size_mm": data.get("square_size_mm", None),
+        "rms_reprojection_error": data.get("rms_reprojection_error", None),
+        "K": K,
+        "D": D,
+        "new_K": new_K,
+        "roi": roi,
+        "map1": map1,
+        "map2": map2,
+        "yaml_path": yaml_path,
+    }
+
+    print("[CALIB LOADED]")
+    print("yaml_path:", yaml_path)
+    print("image_size:", (w, h))
+    print("rms:", calib["rms_reprojection_error"])
+    print("K:\n", K)
+    print("D:", D.ravel())
+
+    if new_K is not None:
+        print("new_K:\n", new_K)
+        print("roi:", roi)
+
+    return calib
+
 
 
 
