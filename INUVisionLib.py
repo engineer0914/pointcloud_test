@@ -9,14 +9,153 @@ import open3d as o3d
 from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
 
-import numpy as np
-import cv2
 import pyrealsense2 as rs
+
+import numpy as np
+import open3d as o3d
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
 
 
 
 # 카메라 설정 함수들
+
+def load_rgb_calibration_from_folder(
+    calib_folder,
+    yaml_name=None,
+    alpha=0,
+    make_undistort_map=True
+):
+    """
+    OpenCV RGB 캘리브레이션 YAML을 폴더 경로에서 불러오는 함수.
+
+    Parameters
+    ----------
+    calib_folder : str
+        YAML 파일이 들어있는 폴더 경로.
+    yaml_name : str or None
+        특정 YAML 파일명을 지정하고 싶을 때 사용.
+        None이면 폴더 안의 .yaml 또는 .yml 파일 중 첫 번째를 사용.
+    alpha : float
+        cv2.getOptimalNewCameraMatrix의 alpha.
+        0: 검은 영역 최소화 / crop 느낌
+        1: 시야 최대 보존
+    make_undistort_map : bool
+        True이면 remap용 map1, map2까지 생성.
+
+    Returns
+    -------
+    calib : dict
+        {
+            "image_width": int,
+            "image_height": int,
+            "checkerboard_inner_corners": dict,
+            "square_size_mm": float,
+            "rms_reprojection_error": float,
+            "K": np.ndarray,
+            "D": np.ndarray,
+            "new_K": np.ndarray or None,
+            "roi": tuple or None,
+            "map1": np.ndarray or None,
+            "map2": np.ndarray or None,
+            "yaml_path": str
+        }
+    """
+
+    calib_folder = os.path.abspath(calib_folder)
+
+    if not os.path.isdir(calib_folder):
+        raise FileNotFoundError(f"폴더가 없습니다: {calib_folder}")
+
+    # YAML 파일 찾기
+    if yaml_name is not None:
+        yaml_path = os.path.join(calib_folder, yaml_name)
+        if not os.path.isfile(yaml_path):
+            raise FileNotFoundError(f"YAML 파일이 없습니다: {yaml_path}")
+    else:
+        yaml_files = sorted(
+            glob.glob(os.path.join(calib_folder, "*.yaml")) +
+            glob.glob(os.path.join(calib_folder, "*.yml"))
+        )
+
+        if len(yaml_files) == 0:
+            raise FileNotFoundError(f"YAML 파일을 찾지 못했습니다: {calib_folder}")
+
+        yaml_path = yaml_files[0]
+
+    # YAML 로드
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    # 필수 값 확인
+    required_keys = [
+        "image_width",
+        "image_height",
+        "camera_matrix",
+        "dist_coeffs"
+    ]
+
+    for key in required_keys:
+        if key not in data:
+            raise KeyError(f"YAML에 '{key}' 항목이 없습니다: {yaml_path}")
+
+    w = int(data["image_width"])
+    h = int(data["image_height"])
+
+    K = np.array(data["camera_matrix"], dtype=np.float64)
+    D = np.array(data["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
+
+    new_K = None
+    roi = None
+    map1 = None
+    map2 = None
+
+    if make_undistort_map:
+        new_K, roi = cv2.getOptimalNewCameraMatrix(
+            K,
+            D,
+            (w, h),
+            alpha,
+            (w, h)
+        )
+
+        map1, map2 = cv2.initUndistortRectifyMap(
+            K,
+            D,
+            None,
+            new_K,
+            (w, h),
+            cv2.CV_32FC1
+        )
+
+    calib = {
+        "image_width": w,
+        "image_height": h,
+        "checkerboard_inner_corners": data.get("checkerboard_inner_corners", None),
+        "square_size_mm": data.get("square_size_mm", None),
+        "rms_reprojection_error": data.get("rms_reprojection_error", None),
+        "K": K,
+        "D": D,
+        "new_K": new_K,
+        "roi": roi,
+        "map1": map1,
+        "map2": map2,
+        "yaml_path": yaml_path,
+    }
+
+    print("[CALIB LOADED]")
+    print("yaml_path:", yaml_path)
+    print("image_size:", (w, h))
+    print("rms:", calib["rms_reprojection_error"])
+    print("K:\n", K)
+    print("D:", D.ravel())
+
+    if new_K is not None:
+        print("new_K:\n", new_K)
+        print("roi:", roi)
+
+    return calib
 
 CAMERA_PROFILES = {
     # 1. 바닥(Floor) 모드: RANSAC 평면 검출용 (넓고 강하게)
@@ -1419,144 +1558,729 @@ def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=30, visua
         
     return color_img_rgb, depth_img, intrinsics, depth_scale
 
-
-def load_rgb_calibration_from_folder(
-    calib_folder,
-    yaml_name=None,
-    alpha=0,
-    make_undistort_map=True
-):
+def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=False):
     """
-    OpenCV RGB 캘리브레이션 YAML을 폴더 경로에서 불러오는 함수.
-
-    Parameters
-    ----------
-    calib_folder : str
-        YAML 파일이 들어있는 폴더 경로.
-    yaml_name : str or None
-        특정 YAML 파일명을 지정하고 싶을 때 사용.
-        None이면 폴더 안의 .yaml 또는 .yml 파일 중 첫 번째를 사용.
-    alpha : float
-        cv2.getOptimalNewCameraMatrix의 alpha.
-        0: 검은 영역 최소화 / crop 느낌
-        1: 시야 최대 보존
-    make_undistort_map : bool
-        True이면 remap용 map1, map2까지 생성.
-
-    Returns
-    -------
-    calib : dict
-        {
-            "image_width": int,
-            "image_height": int,
-            "checkerboard_inner_corners": dict,
-            "square_size_mm": float,
-            "rms_reprojection_error": float,
-            "K": np.ndarray,
-            "D": np.ndarray,
-            "new_K": np.ndarray or None,
-            "roi": tuple or None,
-            "map1": np.ndarray or None,
-            "map2": np.ndarray or None,
-            "yaml_path": str
-        }
+    YOLOv8 모델을 사용하여 특정 클래스에 대한 객체를 검출하고, 
+    여러 마스크를 하나의 단일 관심 영역(ROI) 마스크로 병합하는 함수.
+    
+    Args:
+        model (YOLO): 로드된 YOLO 모델 객체 (예: YOLO("best.pt"))
+        color_img_bgr (ndarray): 모델 입력용 원본 BGR 이미지
+        target_classes (list, optional): 검출할 클래스 ID 리스트. (예: [0, 1, 3, 4, 5, 6, 8, 9])
+                                         None일 경우 모든 클래스를 검출합니다.
+        visualize (bool): 추론 결과(YOLO plot)를 Matplotlib으로 시각화할지 여부
+        
+    Returns:
+        results (list): YOLO 모델의 원본 추론 결과 객체 리스트
+        mask_binary (ndarray): 검출된 모든 객체의 마스크를 하나로 합친 이진 마스크 (0 or 1, 형태: H x W)
+        vis_yolo (ndarray): 바운딩 박스와 라벨이 그려진 시각화용 이미지 (BGR)
     """
-
-    calib_folder = os.path.abspath(calib_folder)
-
-    if not os.path.isdir(calib_folder):
-        raise FileNotFoundError(f"폴더가 없습니다: {calib_folder}")
-
-    # YAML 파일 찾기
-    if yaml_name is not None:
-        yaml_path = os.path.join(calib_folder, yaml_name)
-        if not os.path.isfile(yaml_path):
-            raise FileNotFoundError(f"YAML 파일이 없습니다: {yaml_path}")
+    
+    # 1. 원본 이미지 크기 파악 (마스크 리사이즈용)
+    img_height, img_width = color_img_bgr.shape[:2]
+    
+    # 2. 모델 추론 (클래스 필터링 적용)
+    if target_classes is not None:
+        results = model(color_img_bgr, classes=target_classes, verbose=False)
     else:
-        yaml_files = sorted(
-            glob.glob(os.path.join(calib_folder, "*.yaml")) +
-            glob.glob(os.path.join(calib_folder, "*.yml"))
-        )
+        results = model(color_img_bgr, verbose=False)
 
-        if len(yaml_files) == 0:
-            raise FileNotFoundError(f"YAML 파일을 찾지 못했습니다: {calib_folder}")
+    # 3. 마스크 병합용 빈 도화지 생성
+    mask_binary = np.zeros((img_height, img_width), dtype=np.uint8)
+    
+    # YOLO의 내장 시각화 결과 이미지 생성
+    vis_yolo = results[0].plot()
 
-        yaml_path = yaml_files[0]
+    # 4. 검출된 마스크 합치기
+    if len(results) > 0 and results[0].masks is not None:
+        masks = results[0].masks.data.cpu().numpy()
+        
+        for mask in masks:
+            # YOLO는 내부적으로 마스크 크기를 조절할 수 있으므로, 원본 이미지 크기에 맞춰 리사이즈
+            mask_resized = cv2.resize(mask, (img_width, img_height), interpolation=cv2.INTER_NEAREST)
+            # 기존 마스크에 겹쳐서 누적 (OR 연산)
+            mask_binary = np.logical_or(mask_binary, mask_resized > 0.5).astype(np.uint8)
+            
+        print(f"🎯 [SUCCESS] {len(masks)}개의 타겟 객체 마스크 병합 완료")
+    else:
+        print("⚠️ [WARN] 지정된 클래스의 객체가 검출되지 않았거나, 마스크가 없습니다.")
 
-    # YAML 로드
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    # 5. 시각화 (옵션)
+    if visualize:
+        # BGR을 RGB로 변환하여 출력
+        # vis_rgb = cv2.cvtColor(vis_yolo, cv2.COLOR_BGR2RGB)
+        
+        # 마스크를 화면에 그리기 쉽게 255 스케일로 변환
+        mask_vis = mask_binary * 255
+        
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        
+        axes[0].imshow(vis_yolo)
+        axes[0].set_title(f"YOLO Segmentations (Targets: {target_classes})")
+        axes[0].axis("off")
+        
+        axes[1].imshow(mask_vis, cmap='gray')
+        axes[1].set_title("Merged Binary Mask (ROI)")
+        axes[1].axis("off")
+        
+        plt.tight_layout()
+        plt.show()
 
-    # 필수 값 확인
-    required_keys = [
-        "image_width",
-        "image_height",
-        "camera_matrix",
-        "dist_coeffs"
-    ]
+    return results, mask_binary, vis_yolo
 
-    for key in required_keys:
-        if key not in data:
-            raise KeyError(f"YAML에 '{key}' 항목이 없습니다: {yaml_path}")
+def filter_overlapping_masks(results, overlap_threshold=0.70, img_shape=(640, 480), visualize=False):
+    """
+    YOLOv8 세그멘테이션 결과에서 겹치는 마스크를 병합하고 오검출을 정리하는 함수.
+    작은 객체의 마스크가 큰 객체의 마스크에 설정된 비율 이상 포함되면 오검출로 간주하고 억제(Suppression)합니다.
+    
+    Args:
+        results (list): YOLO 모델의 추론 결과 객체 리스트 (model(img)의 반환값)
+        overlap_threshold (float): 포함 판단 기준 (0.0 ~ 1.0). 기본값 0.70 (70% 이상 겹치면 무시)
+        img_shape (tuple): 원본 이미지의 (Width, Height). 마스크 리사이즈용
+        visualize (bool): 원본 추론 결과와 정리된 마스크를 비교하는 시각화 플롯 출력 여부
+        
+    Returns:
+        final_detected_objects (list): 억제 후 살아남은 최종 객체들의 리스트. 
+                                       각 요소는 dict 형태 (class_id, class_name, confidence, mask)
+        final_combined_mask (ndarray): 병합된 최종 전체 ROI 마스크 (0 or 1, uint8)
+    """
+    final_detected_objects = []
+    target_w, target_h = img_shape
+    final_combined_mask = np.zeros((target_h, target_w), dtype=np.uint8)
 
-    w = int(data["image_width"])
-    h = int(data["image_height"])
+    if len(results) > 0 and results[0].masks is not None:
+        boxes = results[0].boxes
+        masks = results[0].masks.data.cpu().numpy()  # 형상: (N, H, W)
+        class_ids = boxes.cls.cpu().numpy().astype(int)
+        confidences = boxes.conf.cpu().numpy()
+        
+        # YOLO 결과 객체 내부에 저장된 클래스 이름 딕셔너리 활용 (model 객체 불필요)
+        class_names = results[0].names 
 
-    K = np.array(data["camera_matrix"], dtype=np.float64)
-    D = np.array(data["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
+        # 1. 각 마스크의 픽셀 면적 계산
+        areas = np.array([np.sum(mask > 0.5) for mask in masks])
+        
+        # 2. 면적이 큰 순서대로 인덱스 정렬
+        sorted_indices = np.argsort(-areas)
+        suppressed_indices = set()  # 먹혀서 사라질(무시할) 작은 객체의 인덱스 모음
 
-    new_K = None
-    roi = None
-    map1 = None
-    map2 = None
+        for i in range(len(sorted_indices)):
+            idx_large = sorted_indices[i]
+            
+            # 이미 다른 큰 객체에 먹힌 객체라면 패스
+            if idx_large in suppressed_indices:
+                continue
+                
+            mask_large = masks[idx_large]
+            area_large = areas[idx_large]
+            
+            # 현재 (가장 큰) 객체를 최종 리스트에 추가 (이때 마스크를 원본 해상도로 리사이즈)
+            resized_mask_large = cv2.resize(mask_large, (target_w, target_h), interpolation=cv2.INTER_NEAREST) > 0.5
+            
+            current_obj = {
+                "class_id": class_ids[idx_large],
+                "class_name": class_names[class_ids[idx_large]],
+                "confidence": confidences[idx_large],
+                "mask": resized_mask_large
+            }
+            final_detected_objects.append(current_obj)
+            
+            # 3. 나보다 작은 나머지 객체들과 비교
+            for j in range(i + 1, len(sorted_indices)):
+                idx_small = sorted_indices[j]
+                
+                if idx_small in suppressed_indices:
+                    continue
+                    
+                mask_small = masks[idx_small]
+                area_small = areas[idx_small]
+                
+                # 두 마스크의 교집합(AND) 계산
+                intersection = np.sum(np.logical_and(mask_large > 0.5, mask_small > 0.5))
+                
+                # 작은 마스크가 큰 마스크에 얼마나 포함되어 있는지 비율 계산
+                overlap_ratio = intersection / area_small if area_small > 0 else 0
+                
+                # 작은 마스크의 대부분(지정된 임계값 이상)이 겹친다면 오검출 판단
+                if overlap_ratio > overlap_threshold:
+                    print(f"✂️ [INFO] 억제됨: '{class_names[class_ids[idx_small]]}' (면적:{area_small})가 "
+                          f"'{class_names[class_ids[idx_large]]}' (면적:{area_large})에 {overlap_ratio*100:.1f}% 포함됨.")
+                    suppressed_indices.add(idx_small)
+                    
+                    # 옵션: 작은 마스크의 삐져나온 영역까지 큰 객체로 흡수하고 싶다면
+                    # current_obj["mask"] = np.logical_or(current_obj["mask"], cv2.resize(mask_small, (target_w, target_h), interpolation=cv2.INTER_NEAREST) > 0.5)
 
-    if make_undistort_map:
-        new_K, roi = cv2.getOptimalNewCameraMatrix(
-            K,
-            D,
-            (w, h),
-            alpha,
-            (w, h)
-        )
+    else:
+        print("⚠️ [WARN] 검출된 객체가 없습니다.")
 
-        map1, map2 = cv2.initUndistortRectifyMap(
-            K,
-            D,
-            None,
-            new_K,
-            (w, h),
-            cv2.CV_32FC1
-        )
+    # 4. 최종 결과 출력 및 전체 마스크 병합
+    print(f"\n✅ 최종 검출된 유효 객체/군집 수: {len(final_detected_objects)}개")
+    for obj in final_detected_objects:
+        print(f" - 🏷️ {obj['class_name']} (신뢰도: {obj['confidence']:.2f})")
+        final_combined_mask = np.logical_or(final_combined_mask, obj["mask"]).astype(np.uint8)
 
-    calib = {
-        "image_width": w,
-        "image_height": h,
-        "checkerboard_inner_corners": data.get("checkerboard_inner_corners", None),
-        "square_size_mm": data.get("square_size_mm", None),
-        "rms_reprojection_error": data.get("rms_reprojection_error", None),
-        "K": K,
-        "D": D,
-        "new_K": new_K,
-        "roi": roi,
-        "map1": map1,
-        "map2": map2,
-        "yaml_path": yaml_path,
-    }
+    # 5. 시각화 (옵션)
+    if visualize:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        
+        if len(results) > 0:
+            axes[0].imshow(results[0].plot())
+        else:
+            axes[0].text(0.5, 0.5, 'No Detections', ha='center', va='center', fontsize=15)
+            
+        axes[0].set_title("Original YOLO Output (Messy Overlaps)")
+        axes[0].axis("off")
 
-    print("[CALIB LOADED]")
-    print("yaml_path:", yaml_path)
-    print("image_size:", (w, h))
-    print("rms:", calib["rms_reprojection_error"])
-    print("K:\n", K)
-    print("D:", D.ravel())
+        axes[1].imshow(final_combined_mask, cmap='gray')
+        axes[1].set_title(f"Cleaned Masks ({len(final_detected_objects)} Objects)")
+        axes[1].axis("off")
 
-    if new_K is not None:
-        print("new_K:\n", new_K)
-        print("roi:", roi)
+        plt.tight_layout()
+        plt.show()
 
-    return calib
+    return final_detected_objects, final_combined_mask
 
 
 
+def estimate_floor_plane(depth_img, yolo_combined_mask, intrinsics, depth_scale, depth_trunc=1.5, visualize=False):
+    """
+    [STEP 1] YOLO 마스크를 제외한 바닥(Background) 영역만 추출하여 RANSAC 평면 방정식을 도출합니다.
+    """
+    print("\n[INFO] RANSAC 바닥 평면 추정 시작...")
+    
+    # 1. 객체 영역 제외 및 순수 바닥 Depth 추출
+    filtered_depth_img = cv2.medianBlur(depth_img, 5)
+    kernel = np.ones((7, 7), np.uint8)
+    expanded_yolo_mask = cv2.dilate(yolo_combined_mask, kernel, iterations=3)
+    
+    bg_depth_img = filtered_depth_img.copy()
+    bg_depth_img[expanded_yolo_mask > 0] = 0
+    
+    # 2. Open3D 카메라 파라미터 세팅
+    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+        int(intrinsics.width), int(intrinsics.height),
+        float(intrinsics.fx), float(intrinsics.fy),
+        float(intrinsics.ppx), float(intrinsics.ppy)
+    )
+    o3d_depth_scale = 1.0 / float(depth_scale)
+    
+    # 3. 바닥 포인트 클라우드 생성
+    bg_depth_o3d = o3d.geometry.Image(bg_depth_img)
+    bg_pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        bg_depth_o3d, o3d_intr, depth_scale=o3d_depth_scale, depth_trunc=depth_trunc
+    )
+    bg_pcd = bg_pcd.voxel_down_sample(voxel_size=0.003)
+    
+    # 🚨 방어 코드 1: 다운샘플링 후 포인트가 너무 적으면 중단
+    if len(bg_pcd.points) < 10:
+        print(f"❌ [ERROR] 바닥 포인트 클라우드 생성 실패 (현재 포인트 수: {len(bg_pcd.points)}개)")
+        print(f"   -> 카메라와 바닥의 거리가 {depth_trunc}m 보다 멀 수 있습니다. depth_trunc 값을 늘려보세요.")
+        return None, None, filtered_depth_img
+
+    bg_pcd, _ = bg_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    
+    # 🚨 방어 코드 2: 아웃라이어 제거 후 RANSAC 최소 조건(3개) 검사
+    if len(bg_pcd.points) < 3:
+        print("❌ [ERROR] 아웃라이어 제거 후 RANSAC을 수행할 유효한 포인트가 부족합니다.")
+        return None, None, filtered_depth_img
+    
+    # 4. RANSAC 평면 검출
+    plane_model, inliers = bg_pcd.segment_plane(distance_threshold=0.015, ransac_n=3, num_iterations=1000)
+    a, b, c, d = plane_model
+    plane_normal = np.array([a, b, c])
+    
+    # 카메라 시점 방향 보정
+    if c > 0: 
+        plane_normal = -plane_normal
+        d = -d
+        plane_model = (a, b, c, d)
+        
+    print(f"✅ 바닥 평면 방정식 도출: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
+    
+    if visualize:
+        inlier_cloud = bg_pcd.select_by_index(inliers)
+        inlier_cloud.paint_uniform_color([0.8, 0.8, 0.8])
+        outlier_cloud = bg_pcd.select_by_index(inliers, invert=True)
+        outlier_cloud.paint_uniform_color([1, 0, 0])
+        print("💡 [Visualizer] 3D RANSAC 결과 창이 열립니다. (창을 닫아야 다음 코드가 진행됩니다)")
+        o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud], window_name="Floor RANSAC Result")
+
+    return plane_model, plane_normal, filtered_depth_img
+
+def extract_high_objects_mask(filtered_depth_img, plane_normal, d, intrinsics, depth_scale, color_img_shape, height_threshold=0.040, visualize=False):
+    """
+    [STEP 2] 전체 씬에서 바닥 기준 지정된 높이(height_threshold) 이상 돌출된 포인트를 2D 마스크로 추출합니다.
+    """
+    print(f"\n[INFO] 바닥 기준 {height_threshold*1000:.1f}mm 이상 돌출된 포인트 추출 중...")
+    
+    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+        int(intrinsics.width), int(intrinsics.height),
+        float(intrinsics.fx), float(intrinsics.fy),
+        float(intrinsics.ppx), float(intrinsics.ppy)
+    )
+    o3d_depth_scale = 1.0 / float(depth_scale)
+    
+    # 1. 전체 포인트 클라우드 생성
+    depth_o3d = o3d.geometry.Image(filtered_depth_img)
+    full_pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        depth_o3d, o3d_intr, depth_scale=o3d_depth_scale, depth_trunc=1.5
+    )
+    full_pcd = full_pcd.voxel_down_sample(voxel_size=0.001)
+    
+    # 2. 바닥 평면으로부터의 높이 계산
+    points = np.asarray(full_pcd.points)
+    signed_height = np.dot(points, plane_normal) + d
+    
+    above_threshold_indices = np.where(signed_height > height_threshold)[0]
+    pcd_above = full_pcd.select_by_index(above_threshold_indices)
+    
+    print(f"✅ {height_threshold*1000:.1f}mm 이상 돌출된 3D 포인트 개수: {len(pcd_above.points)}개")
+    
+    # 3. 3D -> 2D 투영 마스크 생성
+    h, w = color_img_shape[:2]
+    projected_mask = np.zeros((h, w), dtype=np.uint8)
+    obj_points = np.asarray(pcd_above.points)
+    
+    if len(obj_points) > 0:
+        x_3d, y_3d, z_3d = obj_points[:, 0], obj_points[:, 1], obj_points[:, 2]
+        z_3d = np.where(z_3d == 0, 0.00001, z_3d)
+        
+        u_coords = np.round((x_3d * intrinsics.fx / z_3d) + intrinsics.ppx).astype(int)
+        v_coords = np.round((y_3d * intrinsics.fy / z_3d) + intrinsics.ppy).astype(int)
+        
+        valid = (u_coords >= 0) & (u_coords < w) & (v_coords >= 0) & (v_coords < h)
+        projected_mask[v_coords[valid], u_coords[valid]] = 1
+        
+        # 미세한 구멍 메우기
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        projected_mask = cv2.morphologyEx(projected_mask, cv2.MORPH_CLOSE, kernel)
+        
+    if visualize:
+        plt.figure(figsize=(8, 6))
+        plt.imshow(projected_mask, cmap='hot')
+        plt.title(f"Projected 2D Mask (> {height_threshold*1000:.1f}mm)")
+        plt.axis("off")
+        plt.show()
+        
+    return projected_mask
+
+def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_threshold=1.5, overlap_threshold=0.20, visualize=False):
+    """
+    [STEP 3] OBB 비율(가로/세로) 및 3D 높이 마스크와의 교집합을 통해 객체의 오분류를 교정합니다.
+    """
+    print("\n[INFO] 객체 마스크 기반 OBB 추출 및 물리적 조건 기반 ID 교정 중...")
+    
+    vis_image = color_img_bgr.copy()
+    h, w = color_img_bgr.shape[:2]
+    
+    mask_high_vis = np.zeros((h, w), dtype=np.uint8)  # 높은 객체 누적용
+    mask_low_vis = np.zeros((h, w), dtype=np.uint8)   # 낮은 객체 누적용
+    
+    # 딕셔너리 리스트 순회 (참조로 값 직접 변경)
+    for obj in detected_objects:
+        yolo_mask = obj["mask"].astype(np.uint8)
+        contours, _ = cv2.findContours(yolo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            continue
+            
+        largest_contour = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(largest_contour)
+        
+        # 1. OBB 비율 계산
+        rect_w, rect_h = rect[1]
+        ratio = max(rect_w, rect_h) / min(rect_w, rect_h) if min(rect_w, rect_h) > 0 else 0
+        
+        # 2. 높이 맵 교집합 계산
+        overlap = np.logical_and(yolo_mask, mask_high_2d)
+        overlap_ratio = np.count_nonzero(overlap) / np.count_nonzero(yolo_mask) if np.count_nonzero(yolo_mask) > 0 else 0
+        
+        old_name = obj["class_name"]
+        
+        # 3. 분기 처리 및 교정
+        if overlap_ratio > overlap_threshold:
+            # [A] 쌓인 객체 (높이 조건 충족)
+            mask_high_vis = np.logical_or(mask_high_vis, yolo_mask).astype(np.uint8)
+            if "2x2" in old_name:
+                new_name = old_name.replace("2x2", "4x2")
+                obj["class_name"] = f"[C]{new_name}"
+                print(f" ⚠️ [높이 교정] 쌓인 블록 감지! '{old_name}' -> '{obj['class_name']}'")
+        else:
+            # [B] 바닥에 깔린 객체
+            mask_low_vis = np.logical_or(mask_low_vis, yolo_mask).astype(np.uint8)
+            if ("4x2" in old_name or "2x4" in old_name) and ratio <= ratio_threshold:
+                new_name = old_name.replace("4x2", "2x2").replace("2x4", "2x2")
+                obj["class_name"] = f"[C]{new_name}"
+                print(f" 🔍 [비율 교정] 짧은 블록 감지 (비율:{ratio:.2f}). '{old_name}' -> '{obj['class_name']}'")
+
+        # 4. 시각화 데이터 렌더링
+        box = np.intp(cv2.boxPoints(rect))
+        cv2.drawContours(vis_image, [box], 0, (0, 0, 255), 2)
+        
+        top_point = box[np.argmin(box[:, 1])]
+        cv2.putText(vis_image, obj['class_name'], (top_point[0] - 20, top_point[1] - 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        cv2.putText(vis_image, f"Ratio: {ratio:.2f}", (top_point[0] - 20, top_point[1] - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+    if visualize:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        axes[0].imshow(mask_high_vis, cmap="gray")
+        axes[0].set_title("YOLO Objects: HIGH (> 40mm)")
+        axes[0].axis("off")
+        axes[1].imshow(mask_low_vis, cmap="gray")
+        axes[1].set_title("YOLO Objects: LOW (<= 40mm)")
+        axes[1].axis("off")
+        axes[2].imshow(cv2.cvtColor(vis_image, cv2.COLOR_BGR2RGB))
+        axes[2].set_title("Final IDs & Oriented Bounding Boxes")
+        axes[2].axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    return detected_objects, vis_image
+
+def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_scale, yolo_combined_mask=None, depth_trunc=1.5, height_threshold=0.005, visualize=False):
+    """
+    Depth 맵을 3D Point Cloud로 변환 후, 바닥(Plane)을 찾아 지정된 높이 이상 
+    돌출된 객체만 추출하고 이를 2D 이미지로 마스킹하여 반환하는 통합 함수.
+    """
+    print("\n[INFO] 3D 기반 돌출 객체 추출 및 2D 마스킹 파이프라인 시작...")
+    
+    filtered_depth_img = cv2.medianBlur(depth_img, 5)
+    
+    # 🎯 [추가됨] YOLO 마스크가 주어졌다면, 객체 영역을 지워 '순수한 바닥용 뎁스' 생성
+    if yolo_combined_mask is not None:
+        kernel = np.ones((7, 7), np.uint8)
+        expanded_yolo_mask = cv2.dilate(yolo_combined_mask, kernel, iterations=3)
+        bg_depth_img = filtered_depth_img.copy()
+        bg_depth_img[expanded_yolo_mask > 0] = 0
+    else:
+        bg_depth_img = filtered_depth_img.copy()
+        
+    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+        int(intrinsics.width), int(intrinsics.height),
+        float(intrinsics.fx), float(intrinsics.fy),
+        float(intrinsics.ppx), float(intrinsics.ppy)
+    )
+    o3d_depth_scale = 1.0 / float(depth_scale)
+    
+    # =================================================================
+    # 파트 A: 바닥 방정식 찾기 (bg_depth_img 활용)
+    # =================================================================
+    bg_depth_o3d = o3d.geometry.Image(bg_depth_img)
+    bg_pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        bg_depth_o3d, o3d_intr, depth_scale=o3d_depth_scale, depth_trunc=depth_trunc
+    )
+    bg_pcd = bg_pcd.voxel_down_sample(voxel_size=0.003) 
+    
+    if len(bg_pcd.points) < 10:
+        print(f"❌ [ERROR] 바닥 검출을 위한 유효한 3D 포인트가 부족합니다.")
+        return None, None, None, None
+
+    bg_pcd, _ = bg_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    
+    labels = np.array(bg_pcd.cluster_dbscan(eps=0.02, min_points=20, print_progress=False))
+    a, b, c, d = 0, 0, 1, 0  
+    
+    if len(labels) > 0 and labels.max() >= 0:
+        largest_cluster_idx = np.argmax(np.bincount(labels[labels >= 0]))
+        main_cluster_indices = np.where(labels == largest_cluster_idx)[0]
+        floor_candidate_pcd = bg_pcd.select_by_index(main_cluster_indices)
+        
+        if len(floor_candidate_pcd.points) >= 3:
+            plane_model, inliers = floor_candidate_pcd.segment_plane(distance_threshold=0.015, ransac_n=3, num_iterations=1000)
+            a, b, c, d = plane_model
+            plane_normal = np.array([a, b, c])
+            if c > 0: 
+                plane_normal = -plane_normal
+                d = -d
+                plane_model = (a, b, c, d)
+            print(f"✅ 바닥 평면 도출 성공: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
+        else:
+            print("⚠️ [WARN] 바닥 후보군 포인트 부족.")
+            return None, None, None, None
+    else:
+        print("⚠️ [WARN] DBSCAN 클러스터링으로 바닥을 찾지 못했습니다.")
+        return None, None, None, None
+
+    # =================================================================
+    # 파트 B: 전체 씬에서 돌출 객체 추출 (원본 filtered_depth_img 활용)
+    # =================================================================
+    full_depth_o3d = o3d.geometry.Image(filtered_depth_img)
+    full_pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        full_depth_o3d, o3d_intr, depth_scale=o3d_depth_scale, depth_trunc=depth_trunc
+    )
+    full_pcd = full_pcd.voxel_down_sample(voxel_size=0.003)
+    
+    points = np.asarray(full_pcd.points)
+    signed_height = np.dot(points, plane_normal) + d
+    
+    object_indices = np.where(signed_height > height_threshold)[0]
+    object_pcd = full_pcd.select_by_index(object_indices)
+    object_points = np.asarray(object_pcd.points)
+    
+    print(f"✅ {height_threshold*1000:.1f}mm 이상 돌출된 객체 포인트: {len(object_points)}개")
+
+    # =================================================================
+    # 파트 C: 2D 사영 및 마스크 정제
+    # =================================================================
+    h, w = color_img_bgr.shape[:2]
+    object_mask_2d = np.zeros((h, w), dtype=np.uint8)
+
+    if len(object_points) > 0:
+        fx, fy = intrinsics.fx, intrinsics.fy
+        cx, cy = intrinsics.ppx, intrinsics.ppy
+
+        x_3d, y_3d = object_points[:, 0], object_points[:, 1]
+        z_3d = np.where(object_points[:, 2] == 0, 0.00001, object_points[:, 2])
+
+        u_coords = np.round((x_3d * fx / z_3d) + cx).astype(int)
+        v_coords = np.round((y_3d * fy / z_3d) + cy).astype(int)
+
+        valid = (u_coords >= 0) & (u_coords < w) & (v_coords >= 0) & (v_coords < h)
+        object_mask_2d[v_coords[valid], u_coords[valid]] = 1
+
+    kernel_fill = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    object_mask_filled = cv2.dilate(object_mask_2d, kernel_fill, iterations=1)
+    object_mask_filled = cv2.morphologyEx(object_mask_filled, cv2.MORPH_CLOSE, kernel_fill)
+
+    mask_255 = (object_mask_filled * 255).astype(np.uint8)
+    kernel_close = np.ones((7, 7), np.uint8)
+    closed_mask = cv2.morphologyEx(mask_255, cv2.MORPH_CLOSE, kernel_close)
+    
+    contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    refined_color_img = cv2.bitwise_and(color_img_bgr, color_img_bgr, mask=closed_mask)
+
+    if visualize:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        axes[0].imshow(object_mask_filled, cmap="gray")
+        axes[0].set_title("1. Original Protruding Mask")
+        axes[0].axis("off")
+        axes[1].imshow(closed_mask, cmap="gray")
+        axes[1].set_title("2. Morphological Closed Mask")
+        axes[1].axis("off")
+        vis_refined_color = refined_color_img.copy()
+        cv2.drawContours(vis_refined_color, contours, -1, (0, 255, 0), 2)
+        axes[2].imshow(cv2.cvtColor(vis_refined_color, cv2.COLOR_BGR2RGB))
+        axes[2].set_title("3. Refined Color Objects")
+        axes[2].axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    return closed_mask, refined_color_img, contours, plane_model
+
+def process_scene_and_get_height_masks(depth_img, intrinsics, depth_scale, color_img_shape):
+    """
+    [STEP 1~3] 3D Point Cloud 생성, DBSCAN+RANSAC 바닥 평탄화 및 높이별 2D 마스크 사영
+    """
+    print("\n[INFO] 3D Scene 분석 및 높이별 2D 마스크 추출 시작...")
+    
+    # 1. Depth 전처리 및 3D 점군 생성
+    filtered_depth_img = cv2.medianBlur(depth_img, 5)
+    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+        int(intrinsics.width), int(intrinsics.height),
+        float(intrinsics.fx), float(intrinsics.fy),
+        float(intrinsics.ppx), float(intrinsics.ppy)
+    )
+    o3d_depth_scale = 1.0 / float(depth_scale)
+
+    depth_o3d = o3d.geometry.Image(filtered_depth_img)
+    pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        depth_o3d, o3d_intr, depth_scale=o3d_depth_scale, depth_trunc=1.5
+    )
+    pcd = pcd.voxel_down_sample(voxel_size=0.003)
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    pcd, _ = pcd.remove_radius_outlier(nb_points=10, radius=0.01)
+
+    # 2. 바닥 검출 및 평탄화
+    labels = np.array(pcd.cluster_dbscan(eps=0.02, min_points=20, print_progress=False))
+    a, b, c, d = 0, 0, 1, 0
+    floor_pcd = None
+    
+    if len(labels) > 0 and labels.max() >= 0:
+        main_cluster_indices = np.where(labels == np.argmax(np.bincount(labels[labels >= 0])))[0]
+        floor_candidate_pcd = pcd.select_by_index(main_cluster_indices)
+        plane_model, _ = floor_candidate_pcd.segment_plane(distance_threshold=0.015, ransac_n=3, num_iterations=1000)
+        a, b, c, d = plane_model
+        plane_normal = np.array([a, b, c])
+        if c > 0:
+            plane_normal = -plane_normal
+            d = -d
+            
+        # 바닥 평탄화 (다림질)
+        points = np.asarray(pcd.points)
+        signed_height = np.dot(points, plane_normal) + d
+        floor_indices = np.where(signed_height <= 0.005)[0]
+        floor_pcd = pcd.select_by_index(floor_indices)
+        floor_points = np.asarray(floor_pcd.points)
+        distances = np.dot(floor_points, plane_normal) + d
+        flattened_points = floor_points - np.outer(distances, plane_normal)
+        floor_pcd.points = o3d.utility.Vector3dVector(flattened_points)
+        floor_pcd.paint_uniform_color([0.8, 0.8, 0.8])
+    else:
+        print("⚠️ 바닥을 검출하지 못했습니다.")
+        points = np.asarray(pcd.points)
+        signed_height = np.zeros(len(points))
+        plane_normal = np.array([0, 0, 1])
+
+    # 3. 2D 마스크 사영 내부 함수
+    h, w = color_img_shape[:2]
+    def get_projected_mask(height_threshold):
+        indices = np.where(signed_height > height_threshold)[0]
+        obj_pts = points[indices]
+        mask_2d = np.zeros((h, w), dtype=np.uint8)
+        if len(obj_pts) > 0:
+            x_3d, y_3d = obj_pts[:, 0], obj_pts[:, 1]
+            z_3d = np.where(obj_pts[:, 2] == 0, 0.00001, obj_pts[:, 2])
+            u_coords = np.round((x_3d * intrinsics.fx / z_3d) + intrinsics.ppx).astype(int)
+            v_coords = np.round((y_3d * intrinsics.fy / z_3d) + intrinsics.ppy).astype(int)
+            valid = (u_coords >= 0) & (u_coords < w) & (v_coords >= 0) & (v_coords < h)
+            mask_2d[v_coords[valid], u_coords[valid]] = 1
+        return mask_2d
+
+    mask_5mm_2d = get_projected_mask(0.005)
+    mask_40mm_2d = get_projected_mask(0.040)
+    
+    # 3D 융합 시 사용할 데이터 패키지
+    pcd_data = {"points": points, "signed_height": signed_height}
+    plane_data = {"normal": plane_normal, "d": d}
+
+    return mask_5mm_2d, mask_40mm_2d, pcd_data, plane_data, floor_pcd
 
 
+
+def fuse_yolo_and_generate_3d_obbs(detected_objects, refined_mask_01, mask_40mm_2d, pcd_data, plane_data, intrinsics, color_img_rgb, floor_pcd=None):
+    """
+    [STEP 4~5] YOLO와 3D 마스크 융합, ID 교정, 최저 높이 객체 판별 및 바닥 밀착형 3D OBB 생성
+    """
+    print("\n[INFO] YOLO 융합, ID 교정 및 3D 바운딩 박스 생성 중...")
+    
+    h, w = color_img_rgb.shape[:2]
+    vis_image = color_img_rgb.copy()
+    mask_high_vis = np.zeros((h, w), dtype=np.uint8)
+    mask_low_vis = np.zeros((h, w), dtype=np.uint8)
+
+    points = pcd_data["points"]
+    signed_height = pcd_data["signed_height"]
+    plane_normal = plane_data["normal"]
+    d = plane_data["d"]
+
+    # 3D -> 2D 맵핑 인덱스 준비
+    z_3d_safe = np.where(points[:, 2] == 0, 0.00001, points[:, 2])
+    u_all = np.round((points[:, 0] * intrinsics.fx / z_3d_safe) + intrinsics.ppx).astype(int)
+    v_all = np.round((points[:, 1] * intrinsics.fy / z_3d_safe) + intrinsics.ppy).astype(int)
+    valid_idx = (u_all >= 0) & (u_all < w) & (v_all >= 0) & (v_all < h)
+    u_valid, v_valid = u_all[valid_idx], v_all[valid_idx]
+    points_valid = points[valid_idx]
+    heights_valid = signed_height[valid_idx]
+
+    vis_elements_3d = [floor_pcd] if floor_pcd is not None else []
+    overlay_geometries_3d = []
+    object_data_list = []
+    color_dict = {}
+    cmap = cm.get_cmap("tab20")
+    N = 1.5
+
+    # 1. 융합 및 데이터 수집
+    for obj in detected_objects:
+        yolo_mask = obj["mask"].astype(np.uint8)
+        fused_mask = np.logical_and(yolo_mask > 0, refined_mask_01 > 0).astype(np.uint8)
+        
+        contours, _ = cv2.findContours(fused_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours: continue
+            
+        largest_contour = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(largest_contour)
+        rect_w, rect_h = rect[1]
+        ratio = max(rect_w, rect_h) / min(rect_w, rect_h) if min(rect_w, rect_h) > 0 else 0
+        
+        overlap_ratio = np.count_nonzero(np.logical_and(fused_mask, mask_40mm_2d)) / np.count_nonzero(fused_mask)
+        if "original_name" not in obj: obj["original_name"] = obj["class_name"]
+        old_name = obj["original_name"]
+        
+        # ID 교정 로직
+        if overlap_ratio > 0.20:
+            mask_high_vis = np.logical_or(mask_high_vis, fused_mask).astype(np.uint8)
+            obj["class_name"] = f"[C]{old_name.replace('2x2', '4x2')}" if "2x2" in old_name else f"[C]{old_name}"
+        else:
+            mask_low_vis = np.logical_or(mask_low_vis, fused_mask).astype(np.uint8)
+            obj["class_name"] = f"[C]{old_name.replace('4x2', '2x2').replace('2x4', '2x2')}" if ("4x2" in old_name or "2x4" in old_name) and ratio <= N else f"[C]{old_name}"
+
+        # 최대 높이 계산
+        in_mask_pixels = fused_mask[v_valid, u_valid] > 0
+        obj_heights = heights_valid[in_mask_pixels]
+        if len(obj_heights) > 0:
+            max_h = max(np.percentile(obj_heights, 95), 0.005)
+            object_data_list.append({"final_id": obj["class_name"], "rect": rect, "in_mask_pixels": in_mask_pixels, "max_h": max_h})
+
+    # 2. 최저 높이 강제 고정 및 3D 객체 생성
+    if object_data_list:
+        min_idx = min(range(len(object_data_list)), key=lambda i: object_data_list[i]["max_h"])
+        old_h = object_data_list[min_idx]["max_h"]
+        object_data_list[min_idx]["max_h"] = 0.024
+        print(f" 🎯 [높이 강제 고정] 가장 낮은 객체('{object_data_list[min_idx]['final_id']}') 높이: {old_h*1000:.1f}mm -> 24.0mm")
+
+    for data in object_data_list:
+        final_id, rect, in_mask_pixels, max_h = data["final_id"], data["rect"], data["in_mask_pixels"], data["max_h"]
+        
+        if final_id not in color_dict: color_dict[final_id] = cmap(len(color_dict) % 20)[:3]
+        obj_color = color_dict[final_id]
+
+        # 3D 클러스터 색상 칠하기
+        obj_pcd = o3d.geometry.PointCloud()
+        obj_pcd.points = o3d.utility.Vector3dVector(points_valid[in_mask_pixels])
+        obj_pcd.paint_uniform_color(obj_color)
+        vis_elements_3d.append(obj_pcd)
+
+        # 3D OBB 및 좌표계 (ivl 라이브러리 내 함수 사용)
+        box_2d = np.intp(cv2.boxPoints(rect))
+        box_3d, axes_3d = create_floor_anchored_3d_box_with_axes(box_2d, intrinsics, plane_normal, d, max_h, obj_color, axis_size=0.03)
+        
+        vis_elements_3d.extend([box_3d, axes_3d])
+        overlay_geometries_3d.extend([box_3d, axes_3d])
+
+        # 2D 시각화 (color_img_rgb 기준이므로 빨간색은 (255,0,0)으로 그립니다)
+        cv2.drawContours(vis_image, [box_2d], 0, (255, 0, 0), 2)
+        top_point = box_2d[np.argmin(box_2d[:, 1])]
+        cv2.putText(vis_image, final_id, (top_point[0] - 20, top_point[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+    return detected_objects, vis_elements_3d, overlay_geometries_3d, vis_image, mask_high_vis, mask_low_vis
+
+def visualize_final_rgbd_pointcloud(color_img_rgb, depth_img, intrinsics, depth_scale, refined_mask_01, mask_high_vis, vis_image_2d, vis_elements_3d, overlay_geometries_3d):
+    """
+    [STEP 6] 2D Matplotlib 시각화 및 두 개의 Open3D 뷰어(분석용, RGBD 오버레이용)를 순차적으로 띄웁니다.
+    """
+    # 1. 2D 결과 시각화
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    axes[0].imshow(refined_mask_01, cmap="gray")
+    axes[0].set_title("1. Refined Depth Mask (Convex Hull)")
+    axes[0].axis("off")
+    axes[1].imshow(mask_high_vis, cmap="gray")
+    axes[1].set_title("2. Stacked Objects (> 40mm)")
+    axes[1].axis("off")
+    axes[2].imshow(cv2.cvtColor(vis_image_2d,cv2.COLOR_BGR2RGB))
+    axes[2].set_title("3. Fused YOLO+Depth & OBB")
+    axes[2].axis("off")
+    plt.tight_layout()
+    plt.show(block=False)
+
+    # 2. 첫 번째 3D 뷰어 (분석용 색상 클러스터)
+    print("\n[INFO] 1번 창(분석용 색상 클러스터)을 엽니다. 창을 닫으면 원본 맵이 열립니다.")
+    o3d.visualization.draw_geometries(vis_elements_3d, window_name="1. Analytical 3D Clustered Objects & OBBs")
+
+    # 3. 두 번째 3D 뷰어 (RGB-D 오버레이)
+    print("[INFO] 2번 창(원본 RGB-D 오버레이)을 엽니다.")
+    color_o3d = o3d.geometry.Image(cv2.cvtColor(color_img_rgb,cv2.COLOR_BGR2RGB))
+    depth_o3d_raw = o3d.geometry.Image(cv2.medianBlur(depth_img, 5))
+    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+        int(intrinsics.width), int(intrinsics.height), float(intrinsics.fx), float(intrinsics.fy), float(intrinsics.ppx), float(intrinsics.ppy)
+    )
+    
+    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        color_o3d, depth_o3d_raw, depth_scale=1.0/float(depth_scale), depth_trunc=1.5, convert_rgb_to_intensity=False
+    )
+    rgb_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, o3d_intr)
+    rgb_pcd = rgb_pcd.voxel_down_sample(voxel_size=0.0015)
+    
+    final_overlay_elements = [rgb_pcd] + overlay_geometries_3d
+    o3d.visualization.draw_geometries(final_overlay_elements, window_name="2. Real RGB-D Point Cloud with OBBs & Axes")
