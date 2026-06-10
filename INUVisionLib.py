@@ -2623,3 +2623,122 @@ def visualize_id_correction_and_final_segments(
     }
 
 
+def add_side2_suffix_for_high_corrected_objects(
+    objects_before,
+    objects_after,
+    mask_40mm_2d,
+    overlap_threshold=0.20,
+    only_changed=True,
+    remove_c_prefix=True
+):
+    """
+    40mm 이상 돌출 마스크와 overlap이 큰 객체에 '_side2' suffix를 붙임.
+
+    only_changed=True:
+        ID가 실제로 변경된 객체 중에서만 side2 부여
+        예: 2x2_red -> 4x2_red_side2
+
+    only_changed=False:
+        40mm 이상 overlap이 큰 모든 객체에 side2 부여
+        예: 기존 4x2_red도 4x2_red_side2 가능
+    """
+
+    mask_high_bool = mask_40mm_2d > 0
+
+    for idx, (before_obj, after_obj) in enumerate(zip(objects_before, objects_after)):
+        before_name = before_obj["class_name"]
+        after_name = after_obj["class_name"]
+
+        # [C] prefix 제거하고 싶으면 제거
+        if remove_c_prefix:
+            before_name_clean = before_name.replace("[C]", "")
+            after_name_clean = after_name.replace("[C]", "")
+        else:
+            before_name_clean = before_name
+            after_name_clean = after_name
+
+        obj_mask = after_obj["mask"] > 0
+        obj_area = np.count_nonzero(obj_mask)
+
+        if obj_area == 0:
+            after_obj["class_name"] = after_name_clean
+            after_obj["is_side2"] = False
+            after_obj["height_overlap_ratio"] = 0.0
+            continue
+
+        overlap = np.logical_and(obj_mask, mask_high_bool)
+        overlap_ratio = np.count_nonzero(overlap) / obj_area
+
+        is_high = overlap_ratio > overlap_threshold
+        is_changed = before_name_clean != after_name_clean
+
+        add_side2 = is_high and (is_changed if only_changed else True)
+
+        new_name = after_name_clean
+
+        if add_side2:
+            if not new_name.endswith("_side2"):
+                new_name = f"{new_name}_side2"
+
+            print(
+                f" 🧱 [SIDE2 부여] index {idx}: "
+                f"{before_name_clean} -> {new_name} "
+                f"(overlap={overlap_ratio:.3f})"
+            )
+
+        after_obj["class_name"] = new_name
+        after_obj["is_side2"] = add_side2
+        after_obj["height_overlap_ratio"] = overlap_ratio
+
+    return objects_after
+
+
+def fill_object_mask_by_convex_hull(mask, min_area=20):
+    """
+    객체 mask의 외곽 contour를 잡고 convex hull로 내부를 채움.
+
+    Args:
+        mask: bool, 0/1, 0/255 형태 모두 가능
+        min_area: 너무 작은 contour 제거 기준
+
+    Returns:
+        hull_mask: 0/1 uint8
+    """
+    mask_01 = (mask > 0).astype(np.uint8)
+
+    contours, _ = cv2.findContours(
+        mask_01,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    hull_mask = np.zeros_like(mask_01, dtype=np.uint8)
+
+    if len(contours) == 0:
+        return hull_mask
+
+    # 여러 조각이 있으면 너무 작은 조각은 제거하고 hull 생성
+    valid_contours = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area >= min_area:
+            valid_contours.append(cnt)
+
+    if len(valid_contours) == 0:
+        return hull_mask
+
+    # 가장 큰 contour만 쓰는 버전
+    largest_contour = max(valid_contours, key=cv2.contourArea)
+
+    hull = cv2.convexHull(largest_contour)
+
+    cv2.drawContours(
+        hull_mask,
+        [hull],
+        contourIdx=-1,
+        color=1,
+        thickness=-1
+    )
+
+    return hull_mask
