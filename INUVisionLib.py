@@ -1962,6 +1962,8 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
 
 
 
+
+
 def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_scale, yolo_combined_mask=None, depth_trunc=1.5, height_threshold=0.005, visualize=False):
     """
     Depth 맵을 3D Point Cloud로 변환 후, 바닥(Plane)을 찾아 지정된 높이 이상 
@@ -2307,3 +2309,317 @@ def visualize_final_rgbd_pointcloud(color_img_rgb, depth_img, intrinsics, depth_
     
     final_overlay_elements = [rgb_pcd] + overlay_geometries_3d
     o3d.visualization.draw_geometries(final_overlay_elements, window_name="2. Real RGB-D Point Cloud with OBBs & Axes")
+
+
+def fill_object_mask_holes(mask):
+    """
+    객체 segmentation mask 내부를 외곽 contour 기준으로 채움.
+    mask: 0/1 또는 0/255 uint8
+    return: 0/1 uint8
+    """
+    mask_01 = (mask > 0).astype(np.uint8)
+
+    contours, _ = cv2.findContours(
+        mask_01,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    filled = np.zeros_like(mask_01, dtype=np.uint8)
+
+    if len(contours) > 0:
+        cv2.drawContours(
+            filled,
+            contours,
+            contourIdx=-1,
+            color=1,
+            thickness=-1
+        )
+
+    return filled
+
+
+
+
+def visualize_id_correction_and_final_segments(
+    color_img_bgr,
+    final_objects_before,
+    final_objects_after,
+    mask_40mm_2d,
+    show=True,
+    rng_seed=42,
+    figsize_compare=(20, 12),
+    figsize_overlay=(12, 8)
+):
+    """
+    ID 교정 전/후 OBB 비교 + 40mm 이상 높이 마스크 + 변경 객체만 보기 +
+    최종 instance segmentation overlay 시각화 함수.
+
+    Args:
+        color_img_bgr (np.ndarray): BGR 원본 이미지
+        final_objects_before (list[dict]): ID 교정 전 객체 리스트
+        final_objects_after (list[dict]): ID 교정 후 객체 리스트
+        mask_40mm_2d (np.ndarray): 40mm 이상 돌출 마스크
+        show (bool): True면 plt.show() 실행
+        rng_seed (int): instance mask 색상 고정용 seed
+        figsize_compare (tuple): 전후 비교 figure 크기
+        figsize_overlay (tuple): 최종 segmentation overlay figure 크기
+
+    Returns:
+        dict:
+            changed_indices
+            vis_before
+            vis_after
+            changed_mask
+            changed_only_bgr
+            final_combined_mask
+            instance_color_layer
+            final_overlay
+    """
+
+    # ============================================================
+    # 1. 내부 함수: 객체 리스트 OBB + class_name 시각화
+    # ============================================================
+    def draw_objects_for_id_compare(
+        image_bgr,
+        objects,
+        changed_indices=None,
+        before_objects=None,
+        after_objects=None
+    ):
+        vis = image_bgr.copy()
+
+        if changed_indices is None:
+            changed_indices = set()
+
+        for idx, obj in enumerate(objects):
+            yolo_mask = obj["mask"].astype(np.uint8)
+
+            contours, _ = cv2.findContours(
+                yolo_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            if not contours:
+                continue
+
+            largest_contour = max(contours, key=cv2.contourArea)
+            rect = cv2.minAreaRect(largest_contour)
+            box = np.intp(cv2.boxPoints(rect))
+
+            rect_w, rect_h = rect[1]
+            ratio = max(rect_w, rect_h) / min(rect_w, rect_h) if min(rect_w, rect_h) > 0 else 0
+
+            is_changed = idx in changed_indices
+
+            box_color = (0, 0, 255) if is_changed else (0, 255, 0)
+            text_color = (0, 255, 255) if is_changed else (255, 255, 255)
+            thickness = 3 if is_changed else 1
+
+            cv2.drawContours(vis, [box], 0, box_color, thickness)
+
+            top_point = box[np.argmin(box[:, 1])]
+            x_text = int(top_point[0] - 25)
+            y_text = int(top_point[1] - 35)
+
+            if is_changed and before_objects is not None and after_objects is not None:
+                before_name = before_objects[idx]["class_name"]
+                after_name = after_objects[idx]["class_name"]
+                label = f"{idx}: {before_name} -> {after_name}"
+            else:
+                label = f"{idx}: {obj['class_name']}"
+
+            cv2.putText(
+                vis,
+                label,
+                (x_text, y_text),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                text_color,
+                2,
+                cv2.LINE_AA
+            )
+
+            cv2.putText(
+                vis,
+                f"R:{ratio:.2f}",
+                (x_text, y_text + 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA
+            )
+
+        return vis
+
+    # ============================================================
+    # 2. 변경된 객체 index 찾기
+    # ============================================================
+    changed_indices = []
+
+    for i, (before_obj, after_obj) in enumerate(zip(final_objects_before, final_objects_after)):
+        before_name = before_obj["class_name"]
+        after_name = after_obj["class_name"]
+
+        if before_name != after_name:
+            changed_indices.append(i)
+
+    changed_indices = set(changed_indices)
+
+    print("\n[ID 변경 목록]")
+    if len(changed_indices) == 0:
+        print("변경된 객체 없음")
+    else:
+        for idx in sorted(changed_indices):
+            print(
+                f" - index {idx}: "
+                f"{final_objects_before[idx]['class_name']} -> {final_objects_after[idx]['class_name']}"
+            )
+
+    # ============================================================
+    # 3. 전/후 이미지 생성
+    # ============================================================
+    vis_before = draw_objects_for_id_compare(
+        image_bgr=color_img_bgr,
+        objects=final_objects_before,
+        changed_indices=changed_indices,
+        before_objects=final_objects_before,
+        after_objects=final_objects_after
+    )
+
+    vis_after = draw_objects_for_id_compare(
+        image_bgr=color_img_bgr,
+        objects=final_objects_after,
+        changed_indices=changed_indices,
+        before_objects=final_objects_before,
+        after_objects=final_objects_after
+    )
+
+    # ============================================================
+    # 4. 변경된 객체 마스크만 따로 생성
+    # ============================================================
+    changed_mask = np.zeros(color_img_bgr.shape[:2], dtype=np.uint8)
+
+    for idx in changed_indices:
+        changed_mask = np.logical_or(
+            changed_mask,
+            final_objects_after[idx]["mask"].astype(bool)
+        ).astype(np.uint8)
+
+    changed_mask_255 = (changed_mask * 255).astype(np.uint8)
+
+    changed_only_bgr = cv2.bitwise_and(
+        color_img_bgr,
+        color_img_bgr,
+        mask=changed_mask_255
+    )
+
+    # ============================================================
+    # 5. 최종 segmentation overlay 생성
+    # ============================================================
+    vis = color_img_bgr.copy()
+    instance_color_layer = np.zeros_like(color_img_bgr)
+    final_combined_mask = np.zeros(color_img_bgr.shape[:2], dtype=np.uint8)
+
+    rng = np.random.default_rng(rng_seed)
+
+    for idx, obj in enumerate(final_objects_after):
+        mask = obj["mask"].astype(np.uint8)
+        mask_bool = mask.astype(bool)
+
+        final_combined_mask = np.logical_or(
+            final_combined_mask,
+            mask_bool
+        ).astype(np.uint8)
+
+        color = rng.integers(50, 255, size=3).tolist()  # BGR
+        instance_color_layer[mask_bool] = color
+
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if len(contours) == 0:
+            continue
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        cv2.drawContours(vis, [largest_contour], -1, (0, 0, 255), 2)
+
+        M = cv2.moments(largest_contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            x, y, w, h = cv2.boundingRect(largest_contour)
+            cx, cy = x, y
+
+        label = f"{idx}: {obj['class_name']}"
+
+        cv2.putText(
+            vis,
+            label,
+            (cx - 30, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+
+    final_overlay = cv2.addWeighted(vis, 0.65, instance_color_layer, 0.35, 0)
+
+    # ============================================================
+    # 6. 시각화
+    # ============================================================
+    if show:
+        plt.figure(figsize=figsize_compare)
+
+        plt.subplot(2, 2, 1)
+        plt.imshow(cv2.cvtColor(vis_before, cv2.COLOR_BGR2RGB))
+        plt.title("Before ID Correction")
+        plt.axis("off")
+
+        plt.subplot(2, 2, 2)
+        plt.imshow(cv2.cvtColor(vis_after, cv2.COLOR_BGR2RGB))
+        plt.title("After ID Correction")
+        plt.axis("off")
+
+        plt.subplot(2, 2, 3)
+        plt.imshow(mask_40mm_2d, cmap="hot")
+        plt.title("High Object Mask > 40mm")
+        plt.axis("off")
+
+        plt.subplot(2, 2, 4)
+        plt.imshow(cv2.cvtColor(changed_only_bgr, cv2.COLOR_BGR2RGB))
+        plt.title("Changed Objects Only")
+        plt.axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+        plt.figure(figsize=figsize_overlay)
+        plt.imshow(cv2.cvtColor(final_overlay, cv2.COLOR_BGR2RGB))
+        plt.title("Final Segmented Objects with Labels")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    # ============================================================
+    # 7. 출력 반환
+    # ============================================================
+    return {
+        "changed_indices": changed_indices,
+        "vis_before": vis_before,
+        "vis_after": vis_after,
+        "changed_mask": changed_mask,
+        "changed_only_bgr": changed_only_bgr,
+        "final_combined_mask": final_combined_mask,
+        "instance_color_layer": instance_color_layer,
+        "final_overlay": final_overlay,
+    }
+
+
