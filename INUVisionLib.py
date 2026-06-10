@@ -1553,10 +1553,7 @@ def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=30, visua
         pipeline.stop()
         print("✅ 카메라 스트리밍 안전 종료 완료.")
         
-    # 6. BGR -> RGB 변환 (대부분의 딥러닝/비전 라이브러리 규격에 맞춤)
-    color_img_rgb = cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB) if color_img is not None else None
-        
-    return color_img_rgb, depth_img, intrinsics, depth_scale
+    return color_img, depth_img, intrinsics, depth_scale
 
 def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=False):
     """
@@ -1575,7 +1572,7 @@ def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=Fal
         mask_binary (ndarray): 검출된 모든 객체의 마스크를 하나로 합친 이진 마스크 (0 or 1, 형태: H x W)
         vis_yolo (ndarray): 바운딩 박스와 라벨이 그려진 시각화용 이미지 (BGR)
     """
-    
+
     # 1. 원본 이미지 크기 파악 (마스크 리사이즈용)
     img_height, img_width = color_img_bgr.shape[:2]
     
@@ -1607,14 +1604,11 @@ def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=Fal
 
     # 5. 시각화 (옵션)
     if visualize:
-        # BGR을 RGB로 변환하여 출력
-        # vis_rgb = cv2.cvtColor(vis_yolo, cv2.COLOR_BGR2RGB)
-        
-        # 마스크를 화면에 그리기 쉽게 255 스케일로 변환
+
         mask_vis = mask_binary * 255
         
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        
+        fig, axes = plt.subplots(1, 3, figsize=(14, 6))
+
         axes[0].imshow(vis_yolo)
         axes[0].set_title(f"YOLO Segmentations (Targets: {target_classes})")
         axes[0].axis("off")
@@ -1622,6 +1616,11 @@ def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=Fal
         axes[1].imshow(mask_vis, cmap='gray')
         axes[1].set_title("Merged Binary Mask (ROI)")
         axes[1].axis("off")
+
+        vis_orig = cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB)
+        axes[2].imshow(vis_orig)
+        axes[2].set_title("original")
+        axes[2].axis("off")
         
         plt.tight_layout()
         plt.show()
@@ -1896,22 +1895,44 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
         overlap_ratio = np.count_nonzero(overlap) / np.count_nonzero(yolo_mask) if np.count_nonzero(yolo_mask) > 0 else 0
         
         old_name = obj["class_name"]
-        
-        # 3. 분기 처리 및 교정
+
+        #######################################################################
+        # 디버깅용 - 어디가 바뀌었는지 확인 가능
+        #         
+        # # 3. 분기 처리 및 교정
+        # if overlap_ratio > overlap_threshold:
+        #     # [A] 쌓인 객체 (높이 조건 충족)
+        #     mask_high_vis = np.logical_or(mask_high_vis, yolo_mask).astype(np.uint8)
+        #     if "2x2" in old_name:
+        #         new_name = old_name.replace("2x2", "4x2")
+        #         obj["class_name"] = f"[C]{new_name}"
+        #         print(f" ⚠️ [높이 교정] 쌓인 블록 감지! '{old_name}' -> '{obj['class_name']}'")
+        # else:
+        #     # [B] 바닥에 깔린 객체
+        #     mask_low_vis = np.logical_or(mask_low_vis, yolo_mask).astype(np.uint8)
+        #     if ("4x2" in old_name or "2x4" in old_name) and ratio <= ratio_threshold:
+        #         new_name = old_name.replace("4x2", "2x2").replace("2x4", "2x2")
+        #         obj["class_name"] = f"[C]{new_name}"
+        #         print(f" 🔍 [비율 교정] 짧은 블록 감지 (비율:{ratio:.2f}). '{old_name}' -> '{obj['class_name']}'")
+        #######################################################################
+
+        #######################################################################
+        # 단순 이름 교정
         if overlap_ratio > overlap_threshold:
             # [A] 쌓인 객체 (높이 조건 충족)
             mask_high_vis = np.logical_or(mask_high_vis, yolo_mask).astype(np.uint8)
             if "2x2" in old_name:
                 new_name = old_name.replace("2x2", "4x2")
-                obj["class_name"] = f"[C]{new_name}"
+                obj["class_name"] = f"{new_name}"
                 print(f" ⚠️ [높이 교정] 쌓인 블록 감지! '{old_name}' -> '{obj['class_name']}'")
         else:
             # [B] 바닥에 깔린 객체
             mask_low_vis = np.logical_or(mask_low_vis, yolo_mask).astype(np.uint8)
             if ("4x2" in old_name or "2x4" in old_name) and ratio <= ratio_threshold:
                 new_name = old_name.replace("4x2", "2x2").replace("2x4", "2x2")
-                obj["class_name"] = f"[C]{new_name}"
+                obj["class_name"] = f"{new_name}"
                 print(f" 🔍 [비율 교정] 짧은 블록 감지 (비율:{ratio:.2f}). '{old_name}' -> '{obj['class_name']}'")
+        #######################################################################
 
         # 4. 시각화 데이터 렌더링
         box = np.intp(cv2.boxPoints(rect))
@@ -1938,6 +1959,8 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
         plt.show()
 
     return detected_objects, vis_image
+
+
 
 def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_scale, yolo_combined_mask=None, depth_trunc=1.5, height_threshold=0.005, visualize=False):
     """
