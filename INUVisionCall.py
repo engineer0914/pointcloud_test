@@ -404,90 +404,26 @@ class VisionManager:
 
 
 
-
+# ==========================================
+# 4. 단독 실행용 테스트 코드 (if __name__ == "__main__":)
+# ==========================================
 if __name__ == "__main__":
-
-    devices = ivl.get_realsense_ids()
-
-    if len(devices) == 0:
-        raise RuntimeError("연결된 RealSense 카메라가 없습니다.")
-
-    target_serial = list(devices.keys())[0]
-
-    # 8비트 RGB 이미지, 16비트 뎁스, 인트린직, 뎁스 스케일 출력
-    # 카메라 모드 별로 설정 변경 가능
-
-    color_rgb, depth, intrinsics, scale = ivl.capture_realsense_data(
-        serial_number=target_serial, 
-        mode="mid_50", 
-        visualize=True
-    )
-
-    pose_table, class_index = search_wide(color_rgb, depth, intrinsics, scale, V_visualize=False)
-
-    rows = []
-    for item in pose_table:
-        rows.append({
-            "class_name": item["class_name"],
-            "local_id": item.get("local_id", None),
-            "global_idx": item["global_idx"],
-            "axis_dist_mm": item["axis_dist_mm"],
-            "x_mm": item["x_mm"],
-            "y_mm": item["y_mm"],
-            "z_mm": item["z_mm"],
-            "roll_deg": item["roll_deg"],
-            "pitch_deg": item["pitch_deg"],
-            "yaw_deg": item["yaw_deg"],
-        })
-
-    pose_df = pd.DataFrame(rows)
-
-
-
-
-    target = "4x2_blue"
-
-    pose = ivl.get_nearest_6d_pose_by_class(
-        class_index=class_index,
-        target_class_name=target,
-        local_id=0
-    )
-
-    if pose is not None:
-        x = pose["x_mm"]
-        y = pose["y_mm"]
-        z = pose["z_mm"]
-
-        roll = pose["roll_deg"]
-        pitch = pose["pitch_deg"]
-        yaw = pose["yaw_deg"]
-
-        print("6D Pose")
-        print(f"class: {pose['class_name']}")
-        print(f"local_id: {pose['local_id']}")
-        print(f"global_idx: {pose['global_idx']}")
-        print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
-        print(f"RPY deg: {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
-
-
-    vis_rgb_red0, _ = ivl.visualize_class_pose_on_rgb(
-        class_index=class_index,
-        target_class_name=target,
-        color_rgb=color_rgb,
-        intrinsics=intrinsics,
-        local_id=0,              # 카메라에서 가까운 순서 0부터
-        axis_size_m=0.03,
-        show=True,
-        show_roll_pitch=False
-    )
-
-    vis_rgb_all_red, selected_red_items = ivl.visualize_class_pose_on_rgb(
-        class_index=class_index,
-        target_class_name=target,
-        color_rgb=color_rgb,
-        intrinsics=intrinsics,
-        local_id=None,          # 해당 클래스 전부 표시
-        axis_size_m=0.03,
-        show=True,
-        show_roll_pitch=False
-    )
+    print("\n[INFO] ivc.py 라이브러리 단독 테스트 모드 실행\n")
+    
+    # ---------------------------------------------------------
+    # 테스트 방법 1: 클래스를 이용한 깔끔한 테스트
+    # ---------------------------------------------------------
+    vision = VisionManager()
+    
+    try:
+        vision.capture_camera(visualize=False)
+        vision.run_search(visualize=False)
+        
+        # 4x2_blue (ID 7) 찾기 테스트
+        test_pose = vision.get_pose_by_id(target_id=7, local_id=0)
+        
+        if test_pose:
+            print("클래스를 이용한 포즈 추출 성공!")
+            
+    except Exception as e:
+        print(f"[ERROR] 테스트 중 오류 발생: {e}")
