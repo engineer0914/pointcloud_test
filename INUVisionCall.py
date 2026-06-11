@@ -36,7 +36,7 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         model= model, 
         color_img_bgr=color_img_bgr, 
         target_classes=target_classes, 
-        visualize=V_visualize
+        visualize=False
     )
 
     # results (list): YOLO 모델의 원본 추론 결과 객체 리스트
