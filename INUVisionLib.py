@@ -17,6 +17,23 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
 
+import cv2
+import numpy as np
+import open3d as o3d
+import matplotlib.pyplot as plt
+from matplotlib import cm
+
+import numpy as np
+import pandas as pd
+import re
+
+
+try:
+    from scipy.spatial.transform import Rotation as R
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 
 
 # 카메라 설정 함수들
@@ -2622,7 +2639,7 @@ def visualize_id_correction_and_final_segments(
         plt.tight_layout()
         plt.show()
 
-        
+
         plt.figure(figsize=(18, 8))
 
         plt.subplot(2, 2, 1)
@@ -2782,3 +2799,985 @@ def fill_object_mask_by_convex_hull(mask, min_area=20):
     )
 
     return hull_mask
+
+def build_floor_scene_data_from_depth(
+    depth_img,
+    intrinsics,
+    depth_scale,
+    object_mask_01,
+    depth_trunc=5.0,
+    voxel_size=0.003,
+    plane_dist_thresh=0.015,
+    floor_height_eps=0.005,
+    visualize=False
+):
+    """
+    Convex Hull 등으로 만든 객체 마스크를 제외하고 바닥 RANSAC을 다시 수행.
+    이후 전체 point cloud에 대해 signed_height를 계산하고,
+    바닥 포인트는 plane 위로 투영해서 매끈한 floor_pcd를 생성.
+
+    Returns:
+        pcd_data:
+            {
+                "points": 전체 points,
+                "signed_height": 바닥 기준 signed height,
+                "valid_uv": (u_all, v_all, valid_idx)
+            }
+
+        plane_data:
+            {
+                "normal": 객체 방향으로 향하는 plane normal,
+                "d": plane equation d,
+                "plane_model": (a,b,c,d)
+            }
+
+        floor_pcd:
+            바닥으로 판정된 점들을 plane 위에 투영한 Open3D point cloud
+    """
+
+    print("\n[INFO] Convex Hull 객체 마스크 제외 후 바닥 평면 재추정 중...")
+
+    h, w = depth_img.shape[:2]
+
+    object_mask_01 = (object_mask_01 > 0).astype(np.uint8)
+
+    # 객체 영역 확장해서 바닥 추정에서 제외
+    kernel = np.ones((7, 7), np.uint8)
+    expanded_obj_mask = cv2.dilate(object_mask_01, kernel, iterations=3)
+
+    filtered_depth = cv2.medianBlur(depth_img, 5)
+
+    bg_depth = filtered_depth.copy()
+    bg_depth[expanded_obj_mask > 0] = 0
+
+    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+        int(intrinsics.width),
+        int(intrinsics.height),
+        float(intrinsics.fx),
+        float(intrinsics.fy),
+        float(intrinsics.ppx),
+        float(intrinsics.ppy)
+    )
+
+    o3d_depth_scale = 1.0 / float(depth_scale)
+
+    # ------------------------------------------------------------
+    # 1. 바닥 후보 point cloud
+    # ------------------------------------------------------------
+    bg_depth_o3d = o3d.geometry.Image(bg_depth)
+
+    bg_pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        bg_depth_o3d,
+        o3d_intr,
+        depth_scale=o3d_depth_scale,
+        depth_trunc=depth_trunc
+    )
+
+    bg_pcd = bg_pcd.voxel_down_sample(voxel_size=voxel_size)
+
+    if len(bg_pcd.points) < 30:
+        raise RuntimeError(f"바닥 후보 포인트가 너무 적습니다: {len(bg_pcd.points)}")
+
+    bg_pcd, _ = bg_pcd.remove_statistical_outlier(
+        nb_neighbors=20,
+        std_ratio=2.0
+    )
+
+    if len(bg_pcd.points) < 3:
+        raise RuntimeError("RANSAC 수행 가능한 바닥 포인트가 부족합니다.")
+
+    # ------------------------------------------------------------
+    # 2. RANSAC plane
+    # ------------------------------------------------------------
+    raw_plane_model, inliers = bg_pcd.segment_plane(
+        distance_threshold=plane_dist_thresh,
+        ransac_n=3,
+        num_iterations=1000
+    )
+
+    a, b, c, d = raw_plane_model
+    n_raw = np.array([a, b, c], dtype=np.float64)
+    norm = np.linalg.norm(n_raw)
+
+    if norm < 1e-9:
+        raise RuntimeError("RANSAC plane normal이 비정상입니다.")
+
+    n_raw = n_raw / norm
+    d_raw = d / norm
+
+    # ------------------------------------------------------------
+    # 3. 전체 point cloud
+    # ------------------------------------------------------------
+    full_depth_o3d = o3d.geometry.Image(filtered_depth)
+
+    full_pcd = o3d.geometry.PointCloud.create_from_depth_image(
+        full_depth_o3d,
+        o3d_intr,
+        depth_scale=o3d_depth_scale,
+        depth_trunc=depth_trunc
+    )
+
+    full_pcd = full_pcd.voxel_down_sample(voxel_size=voxel_size)
+
+    points = np.asarray(full_pcd.points)
+
+    if len(points) == 0:
+        raise RuntimeError("전체 point cloud가 비어 있습니다.")
+
+    # ------------------------------------------------------------
+    # 4. 3D point -> 2D pixel projection
+    # ------------------------------------------------------------
+    z_safe = np.where(points[:, 2] == 0, 1e-6, points[:, 2])
+
+    u_all = np.round((points[:, 0] * intrinsics.fx / z_safe) + intrinsics.ppx).astype(int)
+    v_all = np.round((points[:, 1] * intrinsics.fy / z_safe) + intrinsics.ppy).astype(int)
+
+    valid_idx = (
+        (u_all >= 0) & (u_all < w) &
+        (v_all >= 0) & (v_all < h)
+    )
+
+    # ------------------------------------------------------------
+    # 5. normal 방향 선택
+    #    객체 마스크 내부 포인트들의 height가 양수가 되도록 normal 방향 결정
+    # ------------------------------------------------------------
+    u_valid = u_all[valid_idx]
+    v_valid = v_all[valid_idx]
+    points_valid = points[valid_idx]
+
+    in_obj = object_mask_01[v_valid, u_valid] > 0
+
+    h1 = np.dot(points_valid, n_raw) + d_raw
+    h2 = np.dot(points_valid, -n_raw) - d_raw
+
+    if np.count_nonzero(in_obj) > 10:
+        score1 = np.percentile(h1[in_obj], 90)
+        score2 = np.percentile(h2[in_obj], 90)
+
+        if score2 > score1:
+            plane_normal = -n_raw
+            plane_d = -d_raw
+        else:
+            plane_normal = n_raw
+            plane_d = d_raw
+    else:
+        # 객체 포인트가 부족하면 카메라 방향 기준으로 normal z가 음수가 되게 설정
+        # top-down RealSense 기준: 객체 돌출 방향은 대체로 -Z
+        if n_raw[2] > 0:
+            plane_normal = -n_raw
+            plane_d = -d_raw
+        else:
+            plane_normal = n_raw
+            plane_d = d_raw
+
+    signed_height = np.dot(points, plane_normal) + plane_d
+
+    print(
+        f"✅ Plane: "
+        f"{plane_normal[0]:.4f}x + {plane_normal[1]:.4f}y + "
+        f"{plane_normal[2]:.4f}z + {plane_d:.4f} = 0"
+    )
+
+    # ------------------------------------------------------------
+    # 6. 매끈한 바닥 point cloud 생성
+    # ------------------------------------------------------------
+    floor_indices = np.where(np.abs(signed_height) <= floor_height_eps)[0]
+
+    floor_points = points[floor_indices]
+
+    if len(floor_points) > 0:
+        floor_dist = np.dot(floor_points, plane_normal) + plane_d
+        floor_points_flat = floor_points - np.outer(floor_dist, plane_normal)
+
+        floor_pcd = o3d.geometry.PointCloud()
+        floor_pcd.points = o3d.utility.Vector3dVector(floor_points_flat)
+        floor_pcd.paint_uniform_color([0.75, 0.75, 0.75])
+    else:
+        floor_pcd = None
+        print("⚠️ floor_pcd 생성용 바닥 포인트가 부족합니다.")
+
+    pcd_data = {
+        "points": points,
+        "signed_height": signed_height,
+        "u_all": u_all,
+        "v_all": v_all,
+        "valid_idx": valid_idx
+    }
+
+    plane_data = {
+        "normal": plane_normal,
+        "d": plane_d,
+        "plane_model": (
+            float(plane_normal[0]),
+            float(plane_normal[1]),
+            float(plane_normal[2]),
+            float(plane_d)
+        )
+    }
+
+    if visualize:
+        geoms = []
+        if floor_pcd is not None:
+            geoms.append(floor_pcd)
+
+        inlier_cloud = bg_pcd.select_by_index(inliers)
+        inlier_cloud.paint_uniform_color([0.2, 0.8, 0.2])
+        geoms.append(inlier_cloud)
+
+        o3d.visualization.draw_geometries(
+            geoms,
+            window_name="Re-estimated Smooth Floor"
+        )
+
+    return pcd_data, plane_data, floor_pcd
+
+def project_pixel_to_plane(u, v, intrinsics, plane_normal, plane_d):
+    """
+    픽셀 좌표 u,v에서 나가는 camera ray와 plane의 교점을 계산.
+    Open3D camera coordinate 기준.
+    """
+    x = (u - intrinsics.ppx) / intrinsics.fx
+    y = (v - intrinsics.ppy) / intrinsics.fy
+    ray = np.array([x, y, 1.0], dtype=np.float64)
+
+    denom = np.dot(plane_normal, ray)
+
+    if abs(denom) < 1e-9:
+        return None
+
+    t = -plane_d / denom
+
+    if t <= 0:
+        return None
+
+    return ray * t
+
+
+def create_floor_anchored_box_lineset(
+    box_2d,
+    intrinsics,
+    plane_normal,
+    plane_d,
+    height,
+    color=(1.0, 0.0, 0.0)
+):
+    """
+    2D minAreaRect box 4점을 바닥 plane에 투영한 뒤,
+    plane_normal 방향으로 height만큼 올려 3D OBB line set 생성.
+
+    Returns:
+        line_set
+        center_3d
+        floor_center_3d
+        corners_3d
+    """
+
+    floor_corners = []
+
+    for p in box_2d:
+        u, v = int(p[0]), int(p[1])
+        p3d = project_pixel_to_plane(
+            u,
+            v,
+            intrinsics,
+            plane_normal,
+            plane_d
+        )
+
+        if p3d is None:
+            return None, None, None, None
+
+        floor_corners.append(p3d)
+
+    floor_corners = np.asarray(floor_corners, dtype=np.float64)
+
+    top_corners = floor_corners + plane_normal.reshape(1, 3) * float(height)
+
+    corners = np.vstack([floor_corners, top_corners])
+
+    lines = [
+        [0, 1], [1, 2], [2, 3], [3, 0],
+        [4, 5], [5, 6], [6, 7], [7, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7]
+    ]
+
+    colors = [color for _ in lines]
+
+    line_set = o3d.geometry.LineSet()
+    line_set.points = o3d.utility.Vector3dVector(corners)
+    line_set.lines = o3d.utility.Vector2iVector(lines)
+    line_set.colors = o3d.utility.Vector3dVector(colors)
+
+    floor_center = np.mean(floor_corners, axis=0)
+    center_3d = floor_center + plane_normal * (float(height) * 0.5)
+
+    return line_set, center_3d, floor_center, corners
+
+def generate_3d_obbs_from_hull_objects(
+    objects,
+    refined_mask_01,
+    pcd_data,
+    plane_data,
+    intrinsics,
+    color_img_rgb,
+    floor_pcd=None,
+    min_height=0.024,
+    max_height_limit=0.12,
+    height_percentile=95,
+    visualize_2d=True
+):
+    """
+    이미 ID 교정 + side2 처리 + Convex Hull 적용이 끝난 objects를 기준으로
+    floor anchored 3D OBB 생성.
+
+    objects:
+        objects_hull 또는 objects_no_side2
+
+    refined_mask_01:
+        mask_hull_after 또는 mask_no_side2
+
+    Returns:
+        objects_out:
+            각 obj에 obj["obb_3d"] 정보 추가
+
+        vis_elements_3d:
+            Open3D 분석용 geometry list
+
+        overlay_geometries_3d:
+            RGB-D overlay에 얹을 3D box list
+
+        vis_2d_rgb:
+            2D OBB 표시 이미지
+    """
+
+    print("\n[INFO] Convex Hull mask 기준 3D OBB 생성 중...")
+
+    objects_out = copy.deepcopy(objects)
+
+    h, w = color_img_rgb.shape[:2]
+
+    points = pcd_data["points"]
+    signed_height = pcd_data["signed_height"]
+    u_all = pcd_data["u_all"]
+    v_all = pcd_data["v_all"]
+    valid_idx = pcd_data["valid_idx"]
+
+    plane_normal = plane_data["normal"]
+    plane_d = plane_data["d"]
+
+    u_valid = u_all[valid_idx]
+    v_valid = v_all[valid_idx]
+    points_valid = points[valid_idx]
+    heights_valid = signed_height[valid_idx]
+
+    refined_mask_01 = (refined_mask_01 > 0).astype(np.uint8)
+
+    vis_elements_3d = []
+    if floor_pcd is not None:
+        vis_elements_3d.append(floor_pcd)
+
+    overlay_geometries_3d = []
+
+    vis_2d_rgb = color_img_rgb.copy()
+
+    cmap = cm.get_cmap("tab20")
+    color_dict = {}
+
+    obb_results = []
+
+    for idx, obj in enumerate(objects_out):
+        class_name = obj["class_name"]
+
+        obj_mask = (obj["mask"] > 0).astype(np.uint8)
+
+        fused_mask = np.logical_and(
+            obj_mask > 0,
+            refined_mask_01 > 0
+        ).astype(np.uint8)
+
+        contours, _ = cv2.findContours(
+            fused_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if len(contours) == 0:
+            print(f"[SKIP] idx {idx}: contour 없음")
+            obj["obb_3d"] = None
+            continue
+
+        largest_contour = max(contours, key=cv2.contourArea)
+
+        if cv2.contourArea(largest_contour) < 20:
+            print(f"[SKIP] idx {idx}: contour area 너무 작음")
+            obj["obb_3d"] = None
+            continue
+
+        rect = cv2.minAreaRect(largest_contour)
+        box_2d = np.intp(cv2.boxPoints(rect))
+
+        # --------------------------------------------------------
+        # 객체 mask 내부 3D point 추출
+        # --------------------------------------------------------
+        in_mask_pixels = fused_mask[v_valid, u_valid] > 0
+
+        obj_points = points_valid[in_mask_pixels]
+        obj_heights = heights_valid[in_mask_pixels]
+
+        if len(obj_points) < 5:
+            print(f"[SKIP] idx {idx}: 3D point 부족")
+            obj["obb_3d"] = None
+            continue
+
+        # height 계산
+        raw_h = np.percentile(obj_heights, height_percentile)
+
+        # 음수/이상값 방어
+        max_h = float(np.clip(raw_h, min_height, max_height_limit))
+
+        # --------------------------------------------------------
+        # 색상
+        # --------------------------------------------------------
+        if class_name not in color_dict:
+            color_dict[class_name] = cmap(len(color_dict) % 20)[:3]
+
+        obj_color = color_dict[class_name]
+
+        # --------------------------------------------------------
+        # 객체 point cloud
+        # --------------------------------------------------------
+        obj_pcd = o3d.geometry.PointCloud()
+        obj_pcd.points = o3d.utility.Vector3dVector(obj_points)
+        obj_pcd.paint_uniform_color(obj_color)
+        vis_elements_3d.append(obj_pcd)
+
+        # --------------------------------------------------------
+        # floor anchored 3D box
+        # --------------------------------------------------------
+        box_3d, center_3d, floor_center_3d, corners_3d = create_floor_anchored_box_lineset(
+            box_2d=box_2d,
+            intrinsics=intrinsics,
+            plane_normal=plane_normal,
+            plane_d=plane_d,
+            height=max_h,
+            color=obj_color
+        )
+
+        if box_3d is None:
+            print(f"[SKIP] idx {idx}: 2D box → plane projection 실패")
+            obj["obb_3d"] = None
+            continue
+
+        vis_elements_3d.append(box_3d)
+        overlay_geometries_3d.append(box_3d)
+
+        # 중심점 sphere
+        center_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.004)
+        center_sphere.translate(center_3d)
+        center_sphere.paint_uniform_color([1.0, 0.0, 0.0])
+        vis_elements_3d.append(center_sphere)
+        overlay_geometries_3d.append(center_sphere)
+
+        obj["obb_3d"] = {
+            "center_3d_m": center_3d,
+            "center_3d_mm": center_3d * 1000.0,
+            "floor_center_3d_m": floor_center_3d,
+            "height_m": max_h,
+            "height_mm": max_h * 1000.0,
+            "box_2d": box_2d,
+            "corners_3d_m": corners_3d,
+            "num_points": len(obj_points)
+        }
+
+        obb_results.append({
+            "idx": idx,
+            "class_name": class_name,
+            "center_3d_m": center_3d,
+            "center_3d_mm": center_3d * 1000.0,
+            "floor_center_3d_m": floor_center_3d,
+            "height_m": max_h,
+            "height_mm": max_h * 1000.0,
+            "num_points": len(obj_points)
+        })
+
+        # --------------------------------------------------------
+        # 2D 시각화
+        # color_img_rgb 기준이라 빨강은 (255,0,0)
+        # --------------------------------------------------------
+        cv2.drawContours(vis_2d_rgb, [box_2d], 0, (255, 0, 0), 2)
+
+        cx2d, cy2d = rect[0]
+        cx2d, cy2d = int(cx2d), int(cy2d)
+
+        label = f"{idx}: {class_name}"
+        cv2.putText(
+            vis_2d_rgb,
+            label,
+            (cx2d - 40, cy2d - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 0),
+            2,
+            cv2.LINE_AA
+        )
+
+        coord_text = (
+            f"({center_3d[0]*1000:.1f}, "
+            f"{center_3d[1]*1000:.1f}, "
+            f"{center_3d[2]*1000:.1f})mm"
+        )
+
+        cv2.putText(
+            vis_2d_rgb,
+            coord_text,
+            (cx2d - 55, cy2d + 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA
+        )
+
+    print("\n[3D OBB 중심 좌표]")
+    for item in obb_results:
+        c = item["center_3d_mm"]
+        print(
+            f" - idx {item['idx']:02d} | {item['class_name']} | "
+            f"center(mm)=({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}) | "
+            f"h={item['height_mm']:.1f}mm | points={item['num_points']}"
+        )
+
+    if visualize_2d:
+        plt.figure(figsize=(12, 8))
+        plt.imshow(vis_2d_rgb)
+        plt.title("2D OBB + 3D Center Coordinates")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    return objects_out, vis_elements_3d, overlay_geometries_3d, vis_2d_rgb, obb_results
+
+def normalize_vec(v, eps=1e-9):
+    v = np.asarray(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < eps:
+        return None
+    return v / n
+
+
+def rotation_matrix_to_rpy_xyz_deg(R_mat):
+    """
+    Camera frame 기준 roll, pitch, yaw 계산.
+    Convention:
+        R_mat columns = [object_x, object_y, object_z] in camera coordinates
+        Euler order = xyz
+    """
+    if SCIPY_AVAILABLE:
+        rpy = R.from_matrix(R_mat).as_euler("xyz", degrees=True)
+        return rpy  # roll, pitch, yaw
+
+    # scipy 없을 때 fallback
+    sy = np.sqrt(R_mat[0, 0] ** 2 + R_mat[1, 0] ** 2)
+
+    singular = sy < 1e-6
+
+    if not singular:
+        roll = np.arctan2(R_mat[2, 1], R_mat[2, 2])
+        pitch = np.arctan2(-R_mat[2, 0], sy)
+        yaw = np.arctan2(R_mat[1, 0], R_mat[0, 0])
+    else:
+        roll = np.arctan2(-R_mat[1, 2], R_mat[1, 1])
+        pitch = np.arctan2(-R_mat[2, 0], sy)
+        yaw = 0.0
+
+    return np.rad2deg([roll, pitch, yaw])
+
+
+def make_axes_lineset(center, R_obj_cam, axis_size=0.04):
+    """
+    Open3D 좌표축 LineSet 생성.
+    X: red
+    Y: green
+    Z: blue
+    """
+    center = np.asarray(center, dtype=np.float64)
+
+    x_axis = R_obj_cam[:, 0]
+    y_axis = R_obj_cam[:, 1]
+    z_axis = R_obj_cam[:, 2]
+
+    points = np.array([
+        center,
+        center + x_axis * axis_size,
+        center,
+        center + y_axis * axis_size,
+        center,
+        center + z_axis * axis_size,
+    ], dtype=np.float64)
+
+    lines = [
+        [0, 1],
+        [2, 3],
+        [4, 5],
+    ]
+
+    colors = [
+        [1.0, 0.0, 0.0],  # X red
+        [0.0, 1.0, 0.0],  # Y green
+        [0.0, 0.2, 1.0],  # Z blue
+    ]
+
+    axes = o3d.geometry.LineSet()
+    axes.points = o3d.utility.Vector3dVector(points)
+    axes.lines = o3d.utility.Vector2iVector(lines)
+    axes.colors = o3d.utility.Vector3dVector(colors)
+
+    return axes
+
+
+def estimate_pose_axes_from_obb3d(
+    obb_3d,
+    plane_normal,
+    class_name="unknown",
+    axis_size=0.04
+):
+    """
+    3D OBB corners를 기준으로 object coordinate frame 계산.
+
+    Args:
+        obb_3d:
+            obj["obb_3d"] 딕셔너리
+        plane_normal:
+            plane_data["normal"]
+        class_name:
+            객체 이름
+        axis_size:
+            Open3D 좌표축 길이
+
+    Returns:
+        pose_data dict
+    """
+
+    if obb_3d is None:
+        return None
+
+    corners = np.asarray(obb_3d["corners_3d_m"], dtype=np.float64)
+    center = np.asarray(obb_3d["center_3d_m"], dtype=np.float64)
+
+    if corners.shape[0] < 8:
+        return None
+
+    # 바닥 4점
+    floor_corners = corners[:4]
+
+    # Z축: 바닥 normal
+    z_axis = normalize_vec(plane_normal)
+    if z_axis is None:
+        return None
+
+    # 바닥 사각형의 4개 edge 계산
+    edge_candidates = []
+
+    for i in range(4):
+        p0 = floor_corners[i]
+        p1 = floor_corners[(i + 1) % 4]
+        e = p1 - p0
+
+        # normal 성분 제거해서 바닥 평면 위 방향으로 보정
+        e = e - np.dot(e, z_axis) * z_axis
+
+        length = np.linalg.norm(e)
+        if length > 1e-6:
+            edge_candidates.append((length, e, i))
+
+    if len(edge_candidates) == 0:
+        return None
+
+    # X축: 가장 긴 edge 방향
+    edge_candidates.sort(key=lambda x: x[0], reverse=True)
+    x_axis = normalize_vec(edge_candidates[0][1])
+
+    if x_axis is None:
+        return None
+
+    # X축 방향 부호 안정화
+    # 카메라 좌표계에서 x 성분이 양수가 되게 함.
+    # 필요 없으면 이 블록 삭제 가능.
+    if x_axis[0] < 0:
+        x_axis = -x_axis
+
+    # Y축: 오른손 좌표계
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis = normalize_vec(y_axis)
+
+    if y_axis is None:
+        return None
+
+    # X축 재직교화
+    x_axis = np.cross(y_axis, z_axis)
+    x_axis = normalize_vec(x_axis)
+
+    # Rotation matrix
+    # columns = object axes in camera frame
+    R_obj_cam = np.column_stack([x_axis, y_axis, z_axis])
+
+    # det 보정
+    if np.linalg.det(R_obj_cam) < 0:
+        y_axis = -y_axis
+        R_obj_cam = np.column_stack([x_axis, y_axis, z_axis])
+
+    rpy_deg = rotation_matrix_to_rpy_xyz_deg(R_obj_cam)
+
+    axes_3d = make_axes_lineset(
+        center=center,
+        R_obj_cam=R_obj_cam,
+        axis_size=axis_size
+    )
+
+    pose_data = {
+        "class_name": class_name,
+        "center_m": center,
+        "center_mm": center * 1000.0,
+        "R_obj_cam": R_obj_cam,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "z_axis": z_axis,
+        "roll_deg": float(rpy_deg[0]),
+        "pitch_deg": float(rpy_deg[1]),
+        "yaw_deg": float(rpy_deg[2]),
+        "axes_3d": axes_3d,
+    }
+
+    return pose_data
+
+
+
+def normalize_class_name(name, remove_c_prefix=True, remove_side2=False):
+    """
+    '[C]2x2_red_side2' 같은 이름을 정리.
+    """
+    name = str(name)
+
+    if remove_c_prefix:
+        name = name.replace("[C]", "")
+
+    if remove_side2:
+        name = name.replace("_side2", "")
+
+    return name
+
+
+def build_class_sorted_pose_index(
+    objects_obb,
+    use_pose_cam=True,
+    remove_c_prefix=True,
+    remove_side2=False,
+    verbose=True
+):
+    """
+    객체들을 클래스별로 묶고, 카메라 optical axis에서 가까운 순서대로 local_id 부여.
+
+    기준:
+        axis_dist_m = sqrt(x^2 + y^2)
+
+    Args:
+        objects_obb:
+            obj["obb_3d"] 또는 obj["pose_cam"]이 들어있는 객체 리스트
+
+        use_pose_cam:
+            True면 obj["pose_cam"]["center_m"] 우선 사용
+            False면 obj["obb_3d"]["center_3d_m"] 사용
+
+    Returns:
+        pose_table:
+            list[dict], 모든 객체 pose 정보
+
+        class_index:
+            dict[class_name] = 해당 클래스 객체 리스트, axis_dist_m 오름차순
+    """
+
+    pose_table = []
+
+    for global_idx, obj in enumerate(objects_obb):
+        raw_name = obj.get("class_name", "unknown")
+        class_name = normalize_class_name(
+            raw_name,
+            remove_c_prefix=remove_c_prefix,
+            remove_side2=remove_side2
+        )
+
+        center_m = None
+        roll_deg = None
+        pitch_deg = None
+        yaw_deg = None
+        R_obj_cam = None
+
+        # 1순위: pose_cam
+        if use_pose_cam and obj.get("pose_cam", None) is not None:
+            pose = obj["pose_cam"]
+            center_m = np.asarray(pose["center_m"], dtype=np.float64)
+            roll_deg = float(pose["roll_deg"])
+            pitch_deg = float(pose["pitch_deg"])
+            yaw_deg = float(pose["yaw_deg"])
+            R_obj_cam = pose["R_obj_cam"]
+
+        # 2순위: obb_3d
+        elif obj.get("obb_3d", None) is not None:
+            obb = obj["obb_3d"]
+            center_m = np.asarray(obb["center_3d_m"], dtype=np.float64)
+
+            # 아직 RPY가 없으면 None
+            roll_deg = None
+            pitch_deg = None
+            yaw_deg = None
+            R_obj_cam = None
+
+        else:
+            if verbose:
+                print(f"[SKIP] global_idx {global_idx}: pose/obb 없음")
+            continue
+
+        x, y, z = center_m
+        axis_dist_m = float(np.sqrt(x**2 + y**2))
+        depth_m = float(z)
+
+        item = {
+            "global_idx": global_idx,
+            "class_name": class_name,
+            "raw_class_name": raw_name,
+            "axis_dist_m": axis_dist_m,
+            "axis_dist_mm": axis_dist_m * 1000.0,
+            "depth_m": depth_m,
+            "x_m": float(x),
+            "y_m": float(y),
+            "z_m": float(z),
+            "x_mm": float(x * 1000.0),
+            "y_mm": float(y * 1000.0),
+            "z_mm": float(z * 1000.0),
+            "roll_deg": roll_deg,
+            "pitch_deg": pitch_deg,
+            "yaw_deg": yaw_deg,
+            "R_obj_cam": R_obj_cam,
+            "object_ref": obj,
+        }
+
+        pose_table.append(item)
+
+    # 전체를 optical axis 거리 기준으로 정렬
+    pose_table = sorted(pose_table, key=lambda x: x["axis_dist_m"])
+
+    # 클래스별 묶기
+    class_index = {}
+
+    for item in pose_table:
+        cls = item["class_name"]
+
+        if cls not in class_index:
+            class_index[cls] = []
+
+        class_index[cls].append(item)
+
+    # 클래스 내부 local_id 부여
+    for cls, items in class_index.items():
+        items.sort(key=lambda x: x["axis_dist_m"])
+
+        for local_id, item in enumerate(items):
+            item["local_id"] = local_id
+
+    if verbose:
+        print("\n[클래스별 optical axis 가까운 순서]")
+        for cls, items in class_index.items():
+            print(f"\nClass: {cls}")
+
+            for item in items:
+                print(
+                    f"  local_id {item['local_id']:02d} | "
+                    f"global_idx {item['global_idx']:02d} | "
+                    f"axis_dist={item['axis_dist_mm']:.1f} mm | "
+                    f"center=({item['x_mm']:.1f}, {item['y_mm']:.1f}, {item['z_mm']:.1f}) mm | "
+                    f"RPY=({item['roll_deg']}, {item['pitch_deg']}, {item['yaw_deg']})"
+                )
+
+    return pose_table, class_index
+
+def get_nearest_6d_pose_by_class(
+    class_index,
+    target_class_name,
+    local_id=0,
+    remove_c_prefix=True,
+    remove_side2=False
+):
+    """
+    클래스 이름으로 요청하면 optical axis 기준 가까운 순서 중 local_id번째 객체의 6D 반환.
+
+    예:
+        get_nearest_6d_pose_by_class(class_index, "2x2_red", local_id=0)
+    """
+
+    target = normalize_class_name(
+        target_class_name,
+        remove_c_prefix=remove_c_prefix,
+        remove_side2=remove_side2
+    )
+
+    if target not in class_index:
+        print(f"❌ 요청 클래스 없음: {target}")
+        print("가능 클래스:", list(class_index.keys()))
+        return None
+
+    items = class_index[target]
+
+    if local_id >= len(items):
+        print(f"❌ {target} 클래스에 local_id {local_id} 없음. 개수: {len(items)}")
+        return None
+
+    item = items[local_id]
+
+    result_6d = {
+        "class_name": item["class_name"],
+        "local_id": item["local_id"],
+        "global_idx": item["global_idx"],
+
+        # position
+        "x_m": item["x_m"],
+        "y_m": item["y_m"],
+        "z_m": item["z_m"],
+
+        "x_mm": item["x_mm"],
+        "y_mm": item["y_mm"],
+        "z_mm": item["z_mm"],
+
+        # orientation
+        "roll_deg": item["roll_deg"],
+        "pitch_deg": item["pitch_deg"],
+        "yaw_deg": item["yaw_deg"],
+
+        # sorting metric
+        "axis_dist_m": item["axis_dist_m"],
+        "axis_dist_mm": item["axis_dist_mm"],
+
+        # matrix
+        "R_obj_cam": item["R_obj_cam"],
+    }
+
+    print("\n[요청 객체 6D Pose]")
+    print(f"Class      : {result_6d['class_name']}")
+    print(f"local_id   : {result_6d['local_id']}")
+    print(f"global_idx : {result_6d['global_idx']}")
+    print(
+        f"Position mm: "
+        f"x={result_6d['x_mm']:.1f}, "
+        f"y={result_6d['y_mm']:.1f}, "
+        f"z={result_6d['z_mm']:.1f}"
+    )
+    print(
+        f"RPY deg    : "
+        f"roll={result_6d['roll_deg']:.2f}, "
+        f"pitch={result_6d['pitch_deg']:.2f}, "
+        f"yaw={result_6d['yaw_deg']:.2f}"
+    )
+    print(f"Axis dist  : {result_6d['axis_dist_mm']:.1f} mm")
+
+    return result_6d
+
+
