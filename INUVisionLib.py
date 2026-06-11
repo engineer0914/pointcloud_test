@@ -10,29 +10,15 @@ from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
 
 import pyrealsense2 as rs
-
-import numpy as np
-import open3d as o3d
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-
-
-import cv2
-import numpy as np
-import open3d as o3d
 import matplotlib.pyplot as plt
 from matplotlib import cm
-
-import numpy as np
 import pandas as pd
 import re
+import numpy as np
+import copy
 
-
-try:
-    from scipy.spatial.transform import Rotation as R
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
+from scipy.spatial.transform import Rotation as R
+SCIPY_AVAILABLE = True
 
 
 
@@ -3779,5 +3765,154 @@ def get_nearest_6d_pose_by_class(
     print(f"Axis dist  : {result_6d['axis_dist_mm']:.1f} mm")
 
     return result_6d
+
+
+def visualize_3d_obb_results(
+    vis_3d,
+    overlay_3d,
+    color_rgb,
+    depth,
+    intrinsics,
+    scale,
+    show_analysis=True,
+    show_rgbd_overlay=True,
+    depth_trunc=5.0,
+    rgbd_voxel_size=0.0015,
+    median_ksize=5,
+    analysis_window_name="Smooth Floor + Convex Hull Object 3D OBBs",
+    overlay_window_name="RGB-D Point Cloud + Convex Hull 3D OBBs"
+):
+    """
+    3D OBB 결과를 Open3D로 시각화.
+
+    1) 분석용 창:
+        - 매끈한 floor_pcd
+        - 객체별 point cloud
+        - 3D OBB
+        - 중심점 sphere
+
+    2) RGB-D overlay 창:
+        - 원본 RGB-D point cloud
+        - 3D OBB
+        - 중심점 / 좌표축 등 overlay geometry
+
+    Args:
+        vis_3d:
+            generate_3d_obbs_from_hull_objects()에서 반환된 분석용 geometry list.
+
+        overlay_3d:
+            generate_3d_obbs_from_hull_objects()에서 반환된 overlay geometry list.
+
+        color_rgb:
+            RealSense에서 받은 RGB 이미지. shape: H x W x 3.
+
+        depth:
+            RealSense raw depth 이미지. shape: H x W.
+
+        intrinsics:
+            RealSense aligned color intrinsics.
+
+        scale:
+            depth raw value를 meter로 바꾸는 scale.
+
+        show_analysis:
+            True면 분석용 Open3D 창 표시.
+
+        show_rgbd_overlay:
+            True면 RGB-D 원본 point cloud 위에 overlay 표시.
+
+        depth_trunc:
+            Open3D RGBD 생성 시 depth 최대 거리.
+
+        rgbd_voxel_size:
+            RGB-D point cloud downsample voxel 크기.
+
+        median_ksize:
+            depth medianBlur 커널 크기. None 또는 1이면 미적용.
+
+    Returns:
+        result:
+            {
+                "rgb_pcd": rgb_pcd,
+                "final_overlay_elements": final_overlay_elements
+            }
+    """
+
+    import cv2
+    import open3d as o3d
+
+    rgb_pcd = None
+    final_overlay_elements = None
+
+    # =================================================================
+    # [1] Open3D 분석용 시각화
+    # =================================================================
+    if show_analysis:
+        print("\n[INFO] 매끈한 바닥 + 객체 point cloud + 3D OBB 표시")
+
+        o3d.visualization.draw_geometries(
+            vis_3d,
+            window_name=analysis_window_name
+        )
+
+    # =================================================================
+    # [2] RGB-D 원본 point cloud 위에 OBB overlay
+    # =================================================================
+    if show_rgbd_overlay:
+        print("\n[INFO] RGB-D 원본 point cloud 생성 중...")
+
+        # color_rgb는 이미 RGB이므로 cvtColor 하지 않음
+        color_o3d = o3d.geometry.Image(color_rgb)
+
+        if median_ksize is not None and median_ksize >= 3:
+            if median_ksize % 2 == 0:
+                median_ksize += 1
+            depth_for_o3d = cv2.medianBlur(depth, median_ksize)
+        else:
+            depth_for_o3d = depth.copy()
+
+        depth_o3d = o3d.geometry.Image(depth_for_o3d)
+
+        o3d_intr = o3d.camera.PinholeCameraIntrinsic(
+            int(intrinsics.width),
+            int(intrinsics.height),
+            float(intrinsics.fx),
+            float(intrinsics.fy),
+            float(intrinsics.ppx),
+            float(intrinsics.ppy)
+        )
+
+        rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_o3d,
+            depth_o3d,
+            depth_scale=1.0 / float(scale),
+            depth_trunc=depth_trunc,
+            convert_rgb_to_intensity=False
+        )
+
+        rgb_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
+            rgbd_image,
+            o3d_intr
+        )
+
+        if rgbd_voxel_size is not None and rgbd_voxel_size > 0:
+            rgb_pcd = rgb_pcd.voxel_down_sample(
+                voxel_size=rgbd_voxel_size
+            )
+
+        final_overlay_elements = [rgb_pcd] + overlay_3d
+
+        print("\n[INFO] RGB-D 원본 point cloud 위에 3D OBB overlay 표시")
+
+        o3d.visualization.draw_geometries(
+            final_overlay_elements,
+            window_name=overlay_window_name
+        )
+
+    return {
+        "rgb_pcd": rgb_pcd,
+        "final_overlay_elements": final_overlay_elements
+    }
+
 
 
