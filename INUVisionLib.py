@@ -3916,3 +3916,254 @@ def visualize_3d_obb_results(
 
 
 
+
+def normalize_class_name_for_query(name, remove_c_prefix=True, remove_side2=False):
+    name = str(name)
+
+    if remove_c_prefix:
+        name = name.replace("[C]", "")
+
+    if remove_side2:
+        name = name.replace("_side2", "")
+
+    return name
+
+
+def project_point_to_image(pt_3d, intrinsics):
+    """
+    3D point (camera frame, meter) -> 2D pixel
+    """
+    x, y, z = pt_3d
+    if z <= 1e-9:
+        return None
+
+    u = int(round((x * intrinsics.fx / z) + intrinsics.ppx))
+    v = int(round((y * intrinsics.fy / z) + intrinsics.ppy))
+    return (u, v)
+
+
+def visualize_class_pose_on_rgb(
+    class_index,
+    target_class_name,
+    color_rgb,
+    intrinsics,
+    local_id=None,
+    axis_size_m=0.03,
+    show=True,
+    show_roll_pitch=False,
+    remove_c_prefix=True,
+    remove_side2=False,
+    line_thickness=2,
+    font_scale=0.45,
+    text_thickness=2
+):
+    """
+    class_index에서 특정 클래스 객체를 골라
+    RGB 이미지 위에 local_id / global_idx / XYZ / Yaw / 2D OBB / 2D axes를 그려서 보여줌.
+
+    Args:
+        class_index:
+            build_class_sorted_pose_index()의 출력 dict
+
+        target_class_name:
+            예: "2x2_red"
+
+        color_rgb:
+            원본 RGB 이미지
+
+        intrinsics:
+            RealSense intrinsics
+
+        local_id:
+            None이면 해당 클래스의 모든 객체를 그림
+            정수면 해당 local_id 하나만 그림
+
+        axis_size_m:
+            3D axes 길이(m)
+
+        show:
+            True면 plt.show()
+
+        show_roll_pitch:
+            True면 Yaw만 아니라 Roll/Pitch도 같이 표기
+
+        remove_c_prefix:
+            class_index 조회 시 [C] 제거 여부
+
+        remove_side2:
+            class_index 조회 시 _side2 제거 여부
+
+    Returns:
+        vis_rgb:
+            시각화된 RGB 이미지
+
+        selected_items:
+            실제로 그린 객체 item 리스트
+    """
+
+    query_name = normalize_class_name_for_query(
+        target_class_name,
+        remove_c_prefix=remove_c_prefix,
+        remove_side2=remove_side2
+    )
+
+    if query_name not in class_index:
+        raise ValueError(
+            f"요청 클래스 '{query_name}' 없음. 가능한 클래스: {list(class_index.keys())}"
+        )
+
+    class_items = class_index[query_name]
+
+    if local_id is None:
+        selected_items = class_items
+    else:
+        matched = [item for item in class_items if item.get("local_id", None) == local_id]
+        if len(matched) == 0:
+            raise ValueError(
+                f"클래스 '{query_name}'에 local_id={local_id} 없음. "
+                f"가능한 local_id: {[item.get('local_id', None) for item in class_items]}"
+            )
+        selected_items = matched
+
+    # cv2 그리기는 BGR가 편해서 내부적으로 변환
+    vis_bgr = cv2.cvtColor(color_rgb.copy(), cv2.COLOR_RGB2BGR)
+
+    # 클래스 내부에서 보기 좋게 색 다르게
+    rng = np.random.default_rng(42)
+
+    for k, item in enumerate(selected_items):
+        obj = item["object_ref"]
+
+        # ---------- 색상 ----------
+        color = rng.integers(80, 255, size=3).tolist()
+        color = tuple(int(c) for c in color)   # BGR로 사용
+
+        # ---------- 기본 정보 ----------
+        local_id_val = item.get("local_id", None)
+        global_idx = item.get("global_idx", None)
+
+        x_mm = item["x_mm"]
+        y_mm = item["y_mm"]
+        z_mm = item["z_mm"]
+
+        yaw_deg = item["yaw_deg"]
+        roll_deg = item["roll_deg"]
+        pitch_deg = item["pitch_deg"]
+
+        # ---------- 2D OBB ----------
+        box_2d = None
+        if obj.get("obb_3d", None) is not None:
+            box_2d = np.asarray(obj["obb_3d"]["box_2d"], dtype=np.int32)
+
+        if box_2d is not None and len(box_2d) == 4:
+            cv2.drawContours(vis_bgr, [box_2d], 0, color, line_thickness)
+
+            # 중심 텍스트 기준점
+            cx = int(np.mean(box_2d[:, 0]))
+            cy = int(np.mean(box_2d[:, 1]))
+        else:
+            # fallback: 중심 투영
+            center_m = np.array([item["x_m"], item["y_m"], item["z_m"]], dtype=np.float64)
+            center_uv = project_point_to_image(center_m, intrinsics)
+            if center_uv is None:
+                continue
+            cx, cy = center_uv
+
+        # ---------- 2D 중심점 ----------
+        cv2.circle(vis_bgr, (cx, cy), 4, (0, 0, 255), -1)
+
+        # ---------- 3D 좌표축을 2D로 투영 ----------
+        if obj.get("pose_cam", None) is not None:
+            pose = obj["pose_cam"]
+
+            center_m = np.asarray(pose["center_m"], dtype=np.float64)
+            R_obj_cam = np.asarray(pose["R_obj_cam"], dtype=np.float64)
+
+            x_axis = R_obj_cam[:, 0]
+            y_axis = R_obj_cam[:, 1]
+            z_axis = R_obj_cam[:, 2]
+
+            p_center = project_point_to_image(center_m, intrinsics)
+            p_x = project_point_to_image(center_m + x_axis * axis_size_m, intrinsics)
+            p_y = project_point_to_image(center_m + y_axis * axis_size_m, intrinsics)
+            p_z = project_point_to_image(center_m + z_axis * axis_size_m, intrinsics)
+
+            if p_center is not None:
+                if p_x is not None:
+                    cv2.line(vis_bgr, p_center, p_x, (0, 0, 255), 2)   # X = red
+                    cv2.putText(vis_bgr, "X", (p_x[0] + 2, p_x[1] - 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2, cv2.LINE_AA)
+
+                if p_y is not None:
+                    cv2.line(vis_bgr, p_center, p_y, (0, 255, 0), 2)   # Y = green
+                    cv2.putText(vis_bgr, "Y", (p_y[0] + 2, p_y[1] - 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2, cv2.LINE_AA)
+
+                if p_z is not None:
+                    cv2.line(vis_bgr, p_center, p_z, (255, 0, 0), 2)   # Z = blue
+                    cv2.putText(vis_bgr, "Z", (p_z[0] + 2, p_z[1] - 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 2, cv2.LINE_AA)
+
+        # ---------- 텍스트 ----------
+        text_lines = [
+            f"{query_name} | LID:{local_id_val} | GID:{global_idx}",
+            f"XYZ(mm): ({x_mm:.1f}, {y_mm:.1f}, {z_mm:.1f})",
+        ]
+
+        if show_roll_pitch:
+            text_lines.append(
+                f"RPY(deg): ({roll_deg:.1f}, {pitch_deg:.1f}, {yaw_deg:.1f})"
+            )
+        else:
+            text_lines.append(
+                f"YAW(deg): {yaw_deg:.1f}"
+            )
+
+        # 텍스트 위치
+        tx = cx + 10
+        ty = cy - 25
+
+        for i, line in enumerate(text_lines):
+            yy = ty + i * 18
+
+            # 검정 외곽선
+            cv2.putText(
+                vis_bgr,
+                line,
+                (tx, yy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (0, 0, 0),
+                text_thickness + 1,
+                cv2.LINE_AA
+            )
+
+            # 흰 글씨
+            cv2.putText(
+                vis_bgr,
+                line,
+                (tx, yy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (255, 255, 255),
+                text_thickness,
+                cv2.LINE_AA
+            )
+
+    vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+
+    if show:
+        plt.figure(figsize=(14, 10))
+        plt.imshow(vis_rgb)
+        title = f"Class Pose Visualization: {query_name}"
+        if local_id is not None:
+            title += f" (local_id={local_id})"
+        plt.title(title)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    return vis_rgb, selected_items
+
+
+

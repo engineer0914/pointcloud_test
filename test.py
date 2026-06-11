@@ -321,7 +321,7 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
 
     return pose_table, class_index
 
-pose_table, class_index = search_wide(color_rgb, depth, intrinsics, scale, V_visualize=False)
+pose_table, class_index = search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True)
 
 rows = []
 for item in pose_table:
@@ -341,11 +341,53 @@ for item in pose_table:
 pose_df = pd.DataFrame(rows)
 
 
-pose_2x2_red_0 = ivl.get_nearest_6d_pose_by_class(
+target = "4x2_blue"
+
+pose = ivl.get_nearest_6d_pose_by_class(
     class_index=class_index,
-    target_class_name="2x2_red",
+    target_class_name=target,
     local_id=0
 )
 
+if pose is not None:
+    x = pose["x_mm"]
+    y = pose["y_mm"]
+    z = pose["z_mm"]
 
+    roll = pose["roll_deg"]
+    pitch = pose["pitch_deg"]
+    yaw = pose["yaw_deg"]
+
+    print("6D Pose")
+    print(f"class: {pose['class_name']}")
+    print(f"local_id: {pose['local_id']}")
+    print(f"global_idx: {pose['global_idx']}")
+    print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
+    print(f"RPY deg: {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
+
+
+
+
+
+vis_rgb_red0, _ = ivl.visualize_class_pose_on_rgb(
+    class_index=class_index,
+    target_class_name=target,
+    color_rgb=color_rgb,
+    intrinsics=intrinsics,
+    local_id=0,              # 카메라에서 가까운 순서 0부터
+    axis_size_m=0.03,
+    show=True,
+    show_roll_pitch=False
+)
+
+vis_rgb_all_red, selected_red_items = ivl.visualize_class_pose_on_rgb(
+    class_index=class_index,
+    target_class_name=target,
+    color_rgb=color_rgb,
+    intrinsics=intrinsics,
+    local_id=None,          # 해당 클래스 전부 표시
+    axis_size_m=0.03,
+    show=True,
+    show_roll_pitch=False
+)
 
