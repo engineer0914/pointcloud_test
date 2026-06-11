@@ -2346,6 +2346,8 @@ def visualize_id_correction_and_final_segments(
     final_objects_before,
     final_objects_after,
     mask_40mm_2d,
+    mask_before,
+    mask_hull_after,
     show=True,
     rng_seed=42,
     figsize_compare=(20, 12),
@@ -2572,6 +2574,18 @@ def visualize_id_correction_and_final_segments(
 
     final_overlay = cv2.addWeighted(vis, 0.65, instance_color_layer, 0.35, 0)
 
+    color_before_bgr = cv2.bitwise_and(
+        color_img_bgr,
+        color_img_bgr,
+        mask=(mask_before * 255).astype(np.uint8)
+    )
+
+    color_hull_bgr = cv2.bitwise_and(
+        color_img_bgr,
+        color_img_bgr,
+        mask=(mask_hull_after * 255).astype(np.uint8)
+    )
+
     # ============================================================
     # 6. 시각화
     # ============================================================
@@ -2605,6 +2619,32 @@ def visualize_id_correction_and_final_segments(
         plt.imshow(cv2.cvtColor(final_overlay, cv2.COLOR_BGR2RGB))
         plt.title("Final Segmented Objects with Labels")
         plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+
+        
+        plt.figure(figsize=(18, 8))
+
+        plt.subplot(2, 2, 1)
+        plt.imshow(mask_before, cmap="gray")
+        plt.title("Before Hull Mask")
+        plt.axis("off")
+
+        plt.subplot(2, 2, 2)
+        plt.imshow(mask_hull_after, cmap="gray")
+        plt.title("After Convex Hull Mask")
+        plt.axis("off")
+
+        plt.subplot(2, 2, 3)
+        plt.imshow(cv2.cvtColor(color_before_bgr, cv2.COLOR_BGR2RGB))
+        plt.title("Color AND Before Hull")
+        plt.axis("off")
+
+        plt.subplot(2, 2, 4)
+        plt.imshow(cv2.cvtColor(color_hull_bgr, cv2.COLOR_BGR2RGB))
+        plt.title("Color AND After Convex Hull")
+        plt.axis("off")
+
         plt.tight_layout()
         plt.show()
 
