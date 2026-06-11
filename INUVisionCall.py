@@ -17,27 +17,6 @@ from scipy.spatial.transform import Rotation as R
 
 import INUVisionLib as ivl
 
-
-
-print("\n라이브러리 로드")
-
-devices = ivl.get_realsense_ids()
-
-if len(devices) == 0:
-    raise RuntimeError("연결된 RealSense 카메라가 없습니다.")
-
-target_serial = list(devices.keys())[0]
-
-# 8비트 RGB 이미지, 16비트 뎁스, 인트린직, 뎁스 스케일 출력
-# 카메라 모드 별로 설정 변경 가능
-
-color_rgb, depth, intrinsics, scale = ivl.capture_realsense_data(
-    serial_number=target_serial, 
-    mode="mid_50", 
-    visualize=True
-)
-
-
 def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
 
     if color_rgb is None or depth is None or intrinsics is None or scale is None:
@@ -321,73 +300,194 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
 
     return pose_table, class_index
 
-pose_table, class_index = search_wide(color_rgb, depth, intrinsics, scale, V_visualize=False)
+class VisionManager:
+    def __init__(self):
+        # 1. 상태(데이터) 보관함 초기화
+        self.color_rgb = None
+        self.depth = None
+        self.intrinsics = None
+        self.scale = None
+        
+        self.pose_table = None
+        self.class_index = None
 
-rows = []
-for item in pose_table:
-    rows.append({
-        "class_name": item["class_name"],
-        "local_id": item.get("local_id", None),
-        "global_idx": item["global_idx"],
-        "axis_dist_mm": item["axis_dist_mm"],
-        "x_mm": item["x_mm"],
-        "y_mm": item["y_mm"],
-        "z_mm": item["z_mm"],
-        "roll_deg": item["roll_deg"],
-        "pitch_deg": item["pitch_deg"],
-        "yaw_deg": item["yaw_deg"],
-    })
+        # 2. ID -> 클래스 이름 매핑 딕셔너리
+        self.id_to_class = {
+            1: "2x2_red", 2: "2x2_green", 3: "2x2_blue", 4: "2x2_yellow",
+            5: "4x2_red", 6: "4x2_green", 7: "4x2_blue", 8: "4x2_yellow",
+            13: "Magnet",
+            34: "Battery",
+            81: "estop",
+            241: "traffic light",
+            442: "carrot",
+            462: "small tree",
+            711: "hammer",
+            4482: "big carrot",
+            8518: "burger",
+            46262: "bigtree",
+            48132: "icecream"
+        }
 
-pose_df = pd.DataFrame(rows)
+    # ==========================================
+    # 함수 1. 카메라 호출 함수
+    # ==========================================
+    def capture_camera(self, mode="mid_50", visualize=True):
+        print("[INFO] 카메라 데이터 캡처 중...")
+        devices = ivl.get_realsense_ids()
+        
+        if len(devices) == 0:
+            raise RuntimeError("연결된 RealSense 카메라가 없습니다.")
+            
+        target_serial = list(devices.keys())[0]
+
+        # 캡처한 데이터를 클래스 내부 보관함(self)에 저장
+        self.color_rgb, self.depth, self.intrinsics, self.scale = ivl.capture_realsense_data(
+            serial_number=target_serial, 
+            mode=mode, 
+            visualize=visualize
+        )
+        return self.color_rgb, self.depth, self.intrinsics, self.scale
+
+    # ==========================================
+    # 함수 2. 서치 함수
+    # ==========================================
+    def run_search(self, visualize=False):
+        print("[INFO] 전체 객체 탐색(Search Wide) 실행 중...")
+        if self.color_rgb is None:
+            raise RuntimeError("카메라 데이터가 없습니다. 먼저 capture_camera()를 실행하세요.")
+
+        # 보관함에 있던 카메라 데이터를 꺼내서 서치 함수에 넣음
+        self.pose_table, self.class_index = search_wide(
+            self.color_rgb, self.depth, self.intrinsics, self.scale, V_visualize=visualize
+        )
+        return self.pose_table, self.class_index
+
+    # ==========================================
+    # 함수 3. 서치 결과 기반 위치 반환 함수 (ID 변환 포함)
+    # ==========================================
+    def get_pose_by_id(self, target_id, local_id=0):
+        if self.class_index is None:
+            raise RuntimeError("탐색된 인덱스가 없습니다. 먼저 run_search()를 실행하세요.")
+
+        # 1. 입력받은 ID를 문자열 클래스 이름으로 변환
+        target_class_name = self.id_to_class.get(target_id)
+        
+        if target_class_name is None:
+            print(f"[ERROR] 등록되지 않은 ID 번호입니다: {target_id}")
+            return None
+
+        print(f"\n[INFO] 타겟 ID [{target_id}] ➔ 클래스명 ['{target_class_name}'] 변환 완료")
+
+        # 2. 변환된 이름으로 6D 포즈 추출
+        pose = ivl.get_nearest_6d_pose_by_class(
+            class_index=self.class_index,
+            target_class_name=target_class_name,
+            local_id=local_id
+        )
+
+        # 3. 결과 출력 및 반환
+        if pose is not None:
+            x, y, z = pose["x_mm"], pose["y_mm"], pose["z_mm"]
+            roll, pitch, yaw = pose["roll_deg"], pose["pitch_deg"], pose["yaw_deg"]
+
+            print("--- 6D Pose Result ---")
+            print(f"class: {pose['class_name']}")
+            print(f"local_id: {pose['local_id']}")
+            print(f"global_idx: {pose.get('global_idx', 'N/A')}")
+            print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
+            print(f"RPY deg: {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
+            print("----------------------")
+            return pose
+        else:
+            print(f"[WARNING] 시야에서 '{target_class_name}' 객체를 찾을 수 없습니다.")
+            return None
 
 
-target = "4x2_blue"
-
-pose = ivl.get_nearest_6d_pose_by_class(
-    class_index=class_index,
-    target_class_name=target,
-    local_id=0
-)
-
-if pose is not None:
-    x = pose["x_mm"]
-    y = pose["y_mm"]
-    z = pose["z_mm"]
-
-    roll = pose["roll_deg"]
-    pitch = pose["pitch_deg"]
-    yaw = pose["yaw_deg"]
-
-    print("6D Pose")
-    print(f"class: {pose['class_name']}")
-    print(f"local_id: {pose['local_id']}")
-    print(f"global_idx: {pose['global_idx']}")
-    print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
-    print(f"RPY deg: {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
 
 
+if __name__ == "__main__":
+
+    devices = ivl.get_realsense_ids()
+
+    if len(devices) == 0:
+        raise RuntimeError("연결된 RealSense 카메라가 없습니다.")
+
+    target_serial = list(devices.keys())[0]
+
+    # 8비트 RGB 이미지, 16비트 뎁스, 인트린직, 뎁스 스케일 출력
+    # 카메라 모드 별로 설정 변경 가능
+
+    color_rgb, depth, intrinsics, scale = ivl.capture_realsense_data(
+        serial_number=target_serial, 
+        mode="mid_50", 
+        visualize=True
+    )
+
+    pose_table, class_index = search_wide(color_rgb, depth, intrinsics, scale, V_visualize=False)
+
+    rows = []
+    for item in pose_table:
+        rows.append({
+            "class_name": item["class_name"],
+            "local_id": item.get("local_id", None),
+            "global_idx": item["global_idx"],
+            "axis_dist_mm": item["axis_dist_mm"],
+            "x_mm": item["x_mm"],
+            "y_mm": item["y_mm"],
+            "z_mm": item["z_mm"],
+            "roll_deg": item["roll_deg"],
+            "pitch_deg": item["pitch_deg"],
+            "yaw_deg": item["yaw_deg"],
+        })
+
+    pose_df = pd.DataFrame(rows)
 
 
 
-vis_rgb_red0, _ = ivl.visualize_class_pose_on_rgb(
-    class_index=class_index,
-    target_class_name=target,
-    color_rgb=color_rgb,
-    intrinsics=intrinsics,
-    local_id=0,              # 카메라에서 가까운 순서 0부터
-    axis_size_m=0.03,
-    show=True,
-    show_roll_pitch=False
-)
 
-vis_rgb_all_red, selected_red_items = ivl.visualize_class_pose_on_rgb(
-    class_index=class_index,
-    target_class_name=target,
-    color_rgb=color_rgb,
-    intrinsics=intrinsics,
-    local_id=None,          # 해당 클래스 전부 표시
-    axis_size_m=0.03,
-    show=True,
-    show_roll_pitch=False
-)
+    target = "4x2_blue"
 
+    pose = ivl.get_nearest_6d_pose_by_class(
+        class_index=class_index,
+        target_class_name=target,
+        local_id=0
+    )
+
+    if pose is not None:
+        x = pose["x_mm"]
+        y = pose["y_mm"]
+        z = pose["z_mm"]
+
+        roll = pose["roll_deg"]
+        pitch = pose["pitch_deg"]
+        yaw = pose["yaw_deg"]
+
+        print("6D Pose")
+        print(f"class: {pose['class_name']}")
+        print(f"local_id: {pose['local_id']}")
+        print(f"global_idx: {pose['global_idx']}")
+        print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
+        print(f"RPY deg: {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
+
+
+    vis_rgb_red0, _ = ivl.visualize_class_pose_on_rgb(
+        class_index=class_index,
+        target_class_name=target,
+        color_rgb=color_rgb,
+        intrinsics=intrinsics,
+        local_id=0,              # 카메라에서 가까운 순서 0부터
+        axis_size_m=0.03,
+        show=True,
+        show_roll_pitch=False
+    )
+
+    vis_rgb_all_red, selected_red_items = ivl.visualize_class_pose_on_rgb(
+        class_index=class_index,
+        target_class_name=target,
+        color_rgb=color_rgb,
+        intrinsics=intrinsics,
+        local_id=None,          # 해당 클래스 전부 표시
+        axis_size_m=0.03,
+        show=True,
+        show_roll_pitch=False
+    )
