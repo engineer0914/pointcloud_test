@@ -527,6 +527,13 @@ def make_depth_colormap_meters(
 
     return depth_colormap_rgb, depth_m
 
+def normalize_yaw_deg_180(angle_deg):
+    """
+    yaw를 [-180, 180) 범위로 정규화
+    """
+    yaw = (float(angle_deg) + 180.0) % 360.0 - 180.0
+    return yaw
+
 
 
 # 조립체 분석용 함수들
@@ -784,7 +791,8 @@ def extract_object_components_with_pca(
     min_area_px=80,
     morph_open_ksize=3,
     morph_close_ksize=5,
-    show=True
+    show=True,
+    visualize=False
 ):
     """
     depth_img: raw depth image

@@ -300,6 +300,198 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
 
     return pose_table, class_index
 
+def search_assembly(
+    color_rgb,
+    depth,
+    intrinsics,
+    scale,
+    V_visualize=True,
+    class_name="assembly",
+    ransac_distance_threshold=0.006,
+    object_min_plane_dist=0.010,
+    min_area_px=80,
+    morph_open_ksize=3,
+    morph_close_ksize=5,
+    min_contour_area=80
+):
+    """
+    조립체 / 덩어리 검출용 Search 함수.
+
+    목적:
+    - YOLO 없이 depth 기준으로 바닥 plane 제거
+    - 바닥보다 object_min_plane_dist 이상 튀어나온 영역을 object_mask로 생성
+    - object_mask contour별 PCA 수행
+    - 각 덩어리의 중심 XYZ + yaw 반환
+    - 반환 구조는 search_wide()처럼 pose_table, class_index 형태로 맞춤
+
+    반환:
+    - pose_table: list[dict]
+    - class_index: dict[str, list[dict]]
+    """
+
+    if color_rgb is None or depth is None or intrinsics is None or scale is None:
+        raise RuntimeError("RealSense 캡처 실패: color/depth/intrinsics/scale 중 None이 있습니다.")
+
+    depth_img = depth.copy()
+    color_img_rgb = color_rgb.copy()
+    depth_scale = scale
+
+    # ------------------------------------------------------------
+    # 1. RANSAC 바닥 제거 + object mask 생성
+    # ------------------------------------------------------------
+    result = ivl.extract_object_components_with_pca(
+        depth_img=depth_img,
+        depth_scale=depth_scale,
+        intrinsics=intrinsics,
+        color_img_rgb=color_img_rgb,
+
+        # assembly 모드는 YOLO 없이 depth 덩어리만 사용
+        and_mask=None,
+
+        median_ksize=3,
+        ransac_distance_threshold=ransac_distance_threshold,
+        object_min_plane_dist=object_min_plane_dist,
+        min_area_px=min_area_px,
+        morph_open_ksize=morph_open_ksize,
+        morph_close_ksize=morph_close_ksize,
+        show=False,
+        visualize=False
+    )
+
+    object_mask = result["object_mask"]
+    xyz_map = result["xyz_map"]
+    valid_mask = result["valid_mask"]
+    floor_mask = result["floor_mask"]
+    plane_dist_map = result["plane_dist_map"]
+
+    # ------------------------------------------------------------
+    # 2. Contour 기준 PCA 추출
+    # ------------------------------------------------------------
+    contour_objects = ivl.extract_contour_pca_from_mask(
+        object_mask=object_mask,
+        xyz_map=xyz_map,
+        valid_mask=valid_mask,
+        min_contour_area=min_contour_area
+    )
+
+    print("\n[INFO] assembly contour object count:", len(contour_objects))
+
+    # ------------------------------------------------------------
+    # 3. 시각화
+    # ------------------------------------------------------------
+    if V_visualize:
+        vis_contour_pca = ivl.visualize_contour_pca_axes(
+            color_img_rgb=color_img_rgb,
+            object_mask=object_mask,
+            contour_objects=contour_objects,
+            draw_mask=True,
+            draw_contour=True,
+            draw_min_rect=True,
+            axis_len_mode="pca_length",
+            fixed_axis_len=80
+        )
+
+        plt.figure(figsize=(8, 6))
+        plt.imshow(vis_contour_pca)
+        plt.title("Assembly Depth Blob PCA")
+        plt.axis("off")
+        plt.show()
+
+        plt.figure(figsize=(7, 5))
+        plt.imshow(object_mask, cmap="gray")
+        plt.title("RANSAC Assembly Object Mask")
+        plt.axis("off")
+        plt.show()
+
+        plt.figure(figsize=(7, 5))
+        plt.imshow(plane_dist_map * 1000.0, cmap="jet")
+        plt.colorbar(label="Distance from RANSAC plane [mm]")
+        plt.title("Plane Distance Map [mm]")
+        plt.axis("off")
+        plt.show()
+
+    # ------------------------------------------------------------
+    # 4. pose_table / class_index 생성
+    # ------------------------------------------------------------
+    pose_table = []
+
+    for global_idx, obj in enumerate(contour_objects):
+        if "center_xyz" not in obj:
+            print(f"[SKIP] assembly idx {global_idx}: center_xyz 없음")
+            continue
+
+        center_xyz_m = np.asarray(obj["center_xyz"], dtype=np.float64)
+        center_xyz_mm = center_xyz_m * 1000.0
+
+        # 2D contour PCA 기준 yaw
+        yaw_deg = ivl.normalize_yaw_deg_180(obj.get("angle_deg", 0.0))
+
+        # assembly 모드는 바닥 기준 덩어리이므로 roll/pitch는 일단 0으로 둠
+        # 나중에 plane normal 기반으로 확장 가능
+        roll_deg = 0.0
+        pitch_deg = 0.0
+
+        pose = {
+            # search_wide 결과와 맞추기 위한 공통 필드
+            "class_name": class_name,
+            "local_id": global_idx,
+            "global_idx": global_idx,
+
+            "x_mm": float(center_xyz_mm[0]),
+            "y_mm": float(center_xyz_mm[1]),
+            "z_mm": float(center_xyz_mm[2]),
+
+            "roll_deg": float(roll_deg),
+            "pitch_deg": float(pitch_deg),
+            "yaw_deg": float(yaw_deg),
+
+            # 디버그 / 확장용 필드
+            "center_mm": center_xyz_mm,
+            "center_xyz": center_xyz_m,
+            "center_uv": obj.get("center_uv", None),
+
+            "major_axis_uv": obj.get("major_axis_uv", None),
+            "minor_axis_uv": obj.get("minor_axis_uv", None),
+            "angle_deg": obj.get("angle_deg", None),
+
+            "major_axis_xyz": obj.get("major_axis_xyz", None),
+            "middle_axis_xyz": obj.get("middle_axis_xyz", None),
+            "minor_axis_xyz": obj.get("minor_axis_xyz", None),
+
+            "major_length_mm": float(obj.get("major_length_m", 0.0) * 1000.0)
+                if "major_length_m" in obj else None,
+            "middle_length_mm": float(obj.get("middle_length_m", 0.0) * 1000.0)
+                if "middle_length_m" in obj else None,
+            "minor_length_mm": float(obj.get("minor_length_m", 0.0) * 1000.0)
+                if "minor_length_m" in obj else None,
+
+            # 원본 contour object도 필요하면 추적 가능
+            "raw_contour_object": obj
+        }
+
+        pose_table.append(pose)
+
+    # 가까운 순서로 정렬하고 local_id 다시 부여
+    # 기본 기준: 카메라 Z가 작은 것, 즉 카메라에 가까운 덩어리 우선
+    pose_table = sorted(pose_table, key=lambda p: p["z_mm"])
+
+    for local_id, pose in enumerate(pose_table):
+        pose["local_id"] = local_id
+
+    class_index = {
+        class_name: pose_table
+    }
+
+    print("\n[Assembly Pose Table]")
+    for pose in pose_table:
+        print(
+            f"local_id {pose['local_id']:02d} | {pose['class_name']:12s} | "
+            f"XYZ mm=({pose['x_mm']:7.1f}, {pose['y_mm']:7.1f}, {pose['z_mm']:7.1f}) | "
+            f"RPY deg=({pose['roll_deg']:7.2f}, {pose['pitch_deg']:7.2f}, {pose['yaw_deg']:7.2f})"
+        )
+
+    return pose_table, class_index
+
 class VisionManager:
     def __init__(self):
         # 1. 상태(데이터) 보관함 초기화
@@ -311,10 +503,30 @@ class VisionManager:
         self.pose_table = None
         self.class_index = None
 
-        # 2. ID -> 클래스 이름 매핑 딕셔너리
+        # # 2. ID -> 클래스 이름 매핑 딕셔너리
+        # self.id_to_class = {
+        #     1: "2x2_red", 2: "2x2_green", 3: "2x2_blue", 4: "2x2_yellow",
+        #     5: "4x2_red", 6: "4x2_green", 7: "4x2_blue", 8: "4x2_yellow",
+        #     13: "Magnet",
+        #     34: "Battery",
+        #     81: "estop",
+        #     241: "traffic light",
+        #     442: "carrot",
+        #     462: "small tree",
+        #     711: "hammer",
+        #     4482: "big carrot",
+        #     8518: "burger",
+        #     46262: "bigtree",
+        #     48132: "icecream"
+        # }
+
         self.id_to_class = {
             1: "2x2_red", 2: "2x2_green", 3: "2x2_blue", 4: "2x2_yellow",
             5: "4x2_red", 6: "4x2_green", 7: "4x2_blue", 8: "4x2_yellow",
+
+            # assembly / depth blob mode
+            999: "assembly",
+
             13: "Magnet",
             34: "Battery",
             81: "estop",
@@ -363,67 +575,166 @@ class VisionManager:
         return self.pose_table, self.class_index
 
     # ==========================================
+    # 함수 2-1. 조립체 / 덩어리 서치 함수
+    # ==========================================
+    def run_search_assembly(
+        self,
+        visualize=False,
+        class_name="assembly",
+        ransac_distance_threshold=0.006,
+        object_min_plane_dist=0.010,
+        min_area_px=80,
+        morph_open_ksize=3,
+        morph_close_ksize=5,
+        min_contour_area=80
+    ):
+        print("[INFO] 조립체 객체 탐색(Search Assembly) 실행 중...")
+
+        if self.color_rgb is None:
+            raise RuntimeError("카메라 데이터가 없습니다. 먼저 capture_camera()를 실행하세요.")
+
+        self.pose_table, self.class_index = search_assembly(
+            color_rgb=self.color_rgb,
+            depth=self.depth,
+            intrinsics=self.intrinsics,
+            scale=self.scale,
+            V_visualize=visualize,
+            class_name=class_name,
+            ransac_distance_threshold=ransac_distance_threshold,
+            object_min_plane_dist=object_min_plane_dist,
+            min_area_px=min_area_px,
+            morph_open_ksize=morph_open_ksize,
+            morph_close_ksize=morph_close_ksize,
+            min_contour_area=min_contour_area
+        )
+
+        return self.pose_table, self.class_index
+
+    # ==========================================
     # 함수 3. 서치 결과 기반 위치 반환 함수 (ID 변환 포함)
     # ==========================================
     def get_pose_by_id(self, target_id, local_id=0):
         if self.class_index is None:
-            raise RuntimeError("탐색된 인덱스가 없습니다. 먼저 run_search()를 실행하세요.")
+            raise RuntimeError("탐색된 인덱스가 없습니다. 먼저 run_search() 또는 run_search_assembly()를 실행하세요.")
 
         # 1. 입력받은 ID를 문자열 클래스 이름으로 변환
         target_class_name = self.id_to_class.get(target_id)
-        
+
         if target_class_name is None:
             print(f"[ERROR] 등록되지 않은 ID 번호입니다: {target_id}")
             return None
 
         print(f"\n[INFO] 타겟 ID [{target_id}] ➔ 클래스명 ['{target_class_name}'] 변환 완료")
 
-        # 2. 변환된 이름으로 6D 포즈 추출
-        pose = ivl.get_nearest_6d_pose_by_class(
-            class_index=self.class_index,
-            target_class_name=target_class_name,
-            local_id=local_id
-        )
+        pose = None
 
+        # ------------------------------------------------------------
+        # 2-A. 기존 search_wide용 ivl 함수 먼저 시도
+        # ------------------------------------------------------------
+        try:
+            pose = ivl.get_nearest_6d_pose_by_class(
+                class_index=self.class_index,
+                target_class_name=target_class_name,
+                local_id=local_id
+            )
+        except Exception as e:
+            print(f"[INFO] ivl.get_nearest_6d_pose_by_class 사용 실패. 직접 class_index에서 검색합니다.")
+            print(f"[INFO] reason: {e}")
+
+        # ------------------------------------------------------------
+        # 2-B. assembly 모드용 직접 검색 fallback
+        # ------------------------------------------------------------
+        if pose is None:
+            if target_class_name in self.class_index:
+                pose_list = self.class_index[target_class_name]
+
+                if local_id < len(pose_list):
+                    pose = pose_list[local_id]
+                else:
+                    print(
+                        f"[WARNING] '{target_class_name}' 객체는 {len(pose_list)}개만 있습니다. "
+                        f"요청 local_id={local_id}"
+                    )
+                    return None
+            else:
+                print(f"[WARNING] class_index 안에 '{target_class_name}' 클래스가 없습니다.")
+                return None
+
+        # ------------------------------------------------------------
         # 3. 결과 출력 및 반환
+        # ------------------------------------------------------------
         if pose is not None:
-            x, y, z = pose["x_mm"], pose["y_mm"], pose["z_mm"]
-            roll, pitch, yaw = pose["roll_deg"], pose["pitch_deg"], pose["yaw_deg"]
+            x = pose.get("x_mm", None)
+            y = pose.get("y_mm", None)
+            z = pose.get("z_mm", None)
+
+            roll = pose.get("roll_deg", 0.0)
+            pitch = pose.get("pitch_deg", 0.0)
+            yaw = pose.get("yaw_deg", 0.0)
 
             print("--- 6D Pose Result ---")
-            print(f"class: {pose['class_name']}")
-            print(f"local_id: {pose['local_id']}")
+            print(f"class: {pose.get('class_name', target_class_name)}")
+            print(f"local_id: {pose.get('local_id', local_id)}")
             print(f"global_idx: {pose.get('global_idx', 'N/A')}")
-            print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
+
+            if x is not None and y is not None and z is not None:
+                print(f"XYZ mm: {x:.1f}, {y:.1f}, {z:.1f}")
+            else:
+                print("XYZ mm: N/A")
+
             print(f"RPY deg: {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
             print("----------------------")
+
             return pose
+
         else:
             print(f"[WARNING] 시야에서 '{target_class_name}' 객체를 찾을 수 없습니다.")
             return None
 
 
 
+# # ==========================================
+# # 4. 단독 실행용 테스트 코드
+# # ==========================================
+# if __name__ == "__main__":
+#     print("\n[INFO] ivc.py 라이브러리 단독 테스트 모드 실행\n")
+    
+#     # ---------------------------------------------------------
+#     # 테스트 방법 1: 클래스를 이용한 깔끔한 테스트
+#     # ---------------------------------------------------------
+#     vision = VisionManager()
+    
+#     try:
+#         vision.capture_camera(visualize=False)
+#         vision.run_search(visualize=False)
+        
+#         # 4x2_blue (ID 7) 찾기 테스트
+#         test_pose = vision.get_pose_by_id(target_id=7, local_id=0)
+        
+#         if test_pose:
+#             print("클래스를 이용한 포즈 추출 성공!")
+            
+#     except Exception as e:
+#         print(f"[ERROR] 테스트 중 오류 발생: {e}")
+
+
+
+
 # ==========================================
-# 4. 단독 실행용 테스트 코드 (if __name__ == "__main__":)
+# 5. 단독 실행용 테스트 코드_조립체
 # ==========================================
 if __name__ == "__main__":
     print("\n[INFO] ivc.py 라이브러리 단독 테스트 모드 실행\n")
-    
-    # ---------------------------------------------------------
-    # 테스트 방법 1: 클래스를 이용한 깔끔한 테스트
-    # ---------------------------------------------------------
+
     vision = VisionManager()
-    
-    try:
-        vision.capture_camera(visualize=False)
-        vision.run_search(visualize=False)
-        
-        # 4x2_blue (ID 7) 찾기 테스트
-        test_pose = vision.get_pose_by_id(target_id=7, local_id=0)
-        
-        if test_pose:
-            print("클래스를 이용한 포즈 추출 성공!")
-            
-    except Exception as e:
-        print(f"[ERROR] 테스트 중 오류 발생: {e}")
+
+    vision.capture_camera(mode="mid_50", visualize=True)
+
+    pose_table, class_index = vision.run_search_assembly(
+        visualize=True,
+        object_min_plane_dist=0.010,
+        min_contour_area=80
+    )
+
+    pose = vision.get_pose_by_id(target_id=999, local_id=0)
+
