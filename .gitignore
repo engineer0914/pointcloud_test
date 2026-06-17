@@ -6,3 +6,4 @@ yolov8n-seg.pt
 duplo/
 big_carrot/
 opencv_calibration/d435i_images_640x480
+dataset_cropped/
