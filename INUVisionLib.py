@@ -4299,6 +4299,257 @@ def dilate_final_objects(
 
 ################################### 실행 함수
 
+def fine_correct(final_obj_fine,
+    color_rgb,
+    depth,
+    scale,
+    intrinsics,
+    V_visualize=True
+    ):
+
+    img_rgb = color_rgb.copy()
+    if img_rgb.dtype != np.uint8:
+        img_rgb = np.clip(img_rgb, 0, 255).astype(np.uint8)
+
+    # ============================================================
+    # [NEW] Step 0: RANSAC 뎁스 기반 바닥 제거
+    # 바닥면을 찾아 해당 영역을 검은색(0,0,0)으로 칠합니다.
+    # ============================================================
+    # 0-1. 뎁스를 3D 공간 좌표로 변환
+    xyz_map, valid_mask = depth_to_xyz_map(depth, scale, intrinsics)
+    valid_points = xyz_map[valid_mask]
+
+    # 0-2. RANSAC 평면 피팅 (바닥 찾기)
+    best_plane, _ = fit_plane_ransac_numpy(valid_points, distance_threshold=0.006)
+
+    # 0-3. 바닥 평면으로부터의 Z축 거리(높이) 계산
+    dist_map = compute_plane_distance_map(xyz_map, valid_mask, best_plane)
+
+    # 0-4. 바닥에서 1cm(0.01m) 이상 튀어나온 영역만 마스킹 (1cm 미만은 바닥으로 간주)
+    ransac_mask = (dist_map > 0.010).astype(np.uint8) * 255
+
+    # 노이즈를 살짝 지워주기 위해 모폴로지 열기(Open) 적용
+    kernel_open = np.ones((9, 9), np.uint8)
+    ransac_mask = cv2.morphologyEx(ransac_mask, cv2.MORPH_OPEN, kernel_open)
+
+    # 닫기(Close)를 통해 가까운 덩어리들을 1차로 뭉치기
+    kernel_close = np.ones((9, 9), np.uint8)
+    ransac_mask = cv2.morphologyEx(ransac_mask, cv2.MORPH_CLOSE, kernel_close)
+
+    # --------------------------------------------------------
+    # 1. Dilation (팽창) 적용: 테두리 복구 및 덩어리들 확실히 연결
+    # --------------------------------------------------------
+    kernel_dilate = np.ones((5, 5), np.uint8)
+    ransac_mask = cv2.dilate(ransac_mask, kernel_dilate, iterations=1)
+
+    # --------------------------------------------------------
+    # 2. [NEW] Convex Hull (볼록 선체) 적용
+    # 오목하게 파인 부분을 고무줄로 묶듯 팽팽하게 채워서 완벽한 한 덩어리로 만듭니다.
+    # --------------------------------------------------------
+    # 먼저 현재 마스크에서 윤곽선들을 찾습니다.
+    contours_ransac, _ = cv2.findContours(ransac_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Convex Hull을 그려넣을 빈 캔버스 생성
+    hull_mask = np.zeros_like(ransac_mask)
+
+    for cnt in contours_ransac:
+        # 너무 작은 자잘한 노이즈는 무시 (필요시 수치 조절)
+        if cv2.contourArea(cnt) < 200:
+            continue
+            
+        # 윤곽선을 감싸는 최소한의 볼록 다각형(Convex Hull) 좌표 계산
+        hull = cv2.convexHull(cnt)
+        
+        # 빈 캔버스에 볼록 다각형을 내부까지 꽉 채워서(thickness=-1) 흰색(255)으로 그림
+        cv2.drawContours(hull_mask, [hull], -1, 255, thickness=-1)
+
+    # --------------------------------------------------------
+    # 3. [NEW] 최종 Padding (추가 팽창) 적용
+    # Convex Hull로 묶인 객체의 바깥쪽에 여유 공간(패딩)을 줍니다.
+    # --------------------------------------------------------
+    kernel_pad = np.ones((7, 7), np.uint8) # 패딩 두께를 늘리려면 (7, 7) 등으로 조절
+    ransac_mask = cv2.dilate(hull_mask, kernel_pad, iterations=1) # 다음 단계로 넘기기 위해 변수명 원상복구 
+    # 0-5. RGB 이미지에 마스크 씌우기 (바닥 부분은 완전히 검정색으로)
+    img_rgb = cv2.bitwise_and(img_rgb, img_rgb, mask=ransac_mask)
+
+
+    # ============================================================
+    # Step 1: 양방향 필터 (Bilateral Filter) 적용
+    # ============================================================
+    filtered_rgb = cv2.bilateralFilter(img_rgb, d=5, sigmaColor=50, sigmaSpace=50)
+
+    # ============================================================
+
+    # Step 2: LAB 색공간 변환 및 채널 분리
+    # (참고: 앞서 배경을 칠한 검정색은 LAB에서 L=0, a=128, b=128이 됩니다!)
+    # ============================================================
+
+    lab = cv2.cvtColor(filtered_rgb, cv2.COLOR_RGB2LAB)
+    L, a, b = cv2.split(lab)
+
+    # ============================================================
+    # Step 3: 핵심 전처리 - 128(무채색 배경)과의 절대 거리 계산
+    # ============================================================
+    a_dist = cv2.absdiff(a, 128)
+    b_dist = cv2.absdiff(b, 128)
+
+    # ============================================================
+    # Step 4: Min-Max 정규화 (상대평가 스케일링)
+    # ============================================================
+
+    a_norm = cv2.normalize(a_dist, None, 0, 255, cv2.NORM_MINMAX)
+    b_norm = cv2.normalize(b_dist, None, 0, 255, cv2.NORM_MINMAX)
+
+    # ============================================================
+    # Step 5: a와 b 채널 병합
+    # ============================================================
+    ab_combined = cv2.max(a_norm, b_norm)
+
+    # ============================================================
+    # 시각화 1 (각 단계별 변화 및 RANSAC 마스크 확인)
+    # ============================================================
+
+    images = [
+        ("0. RANSAC Floor Mask", ransac_mask, 'gray'),
+        ("1. Masked RGB (Floor Removed)", img_rgb, None),
+        ("2. Bilateral Filtered", filtered_rgb, None),
+        ("3. Raw 'a' Channel", a, 'gray'),
+        ("4. Raw 'b' Channel", b, 'gray'),
+        ("5. |a - 128| Normalized", a_norm, 'gray'),
+        ("6. |b - 128| Normalized", b_norm, 'gray'),
+        ("7. Final Signal for K-Means", ab_combined, 'gray')
+    ]
+    if V_visualize:
+        plt.figure(figsize=(20, 10))
+        for i, (title, img, cmap) in enumerate(images):
+            # 2행 4열 구조로 배치
+            plt.subplot(2, 4, i + 1)
+            plt.title(title)
+            if cmap == 'gray':
+                plt.imshow(img, cmap='gray', vmin=0, vmax=255)
+            else:
+                plt.imshow(img)
+            plt.axis('off')
+        plt.tight_layout()
+        plt.show()
+
+    # ============================================================
+    # Step 8: 이진화 및 모폴로지 정리
+    # ============================================================
+
+    _, binary_mask = cv2.threshold(ab_combined, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = np.ones((7, 7), np.uint8)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
+    # ====================================================================
+
+
+# ============================================================
+    # Step 9: 쿠키 틀 바인딩 및 규격화된 pose_table 생성
+    # ============================================================
+    result_img = color_rgb.copy()
+    fine_pose_table = []  # <--- [NEW] 리턴할 테이블 배열
+
+    for global_idx, obj in enumerate(final_obj_fine):
+        raw_name = obj.get("class_name", "unknown")
+        yolo_mask_bool = np.asarray(obj["mask"], dtype=bool)
+
+        local_cookie_mask = np.zeros_like(binary_mask)
+        local_cookie_mask[yolo_mask_bool] = binary_mask[yolo_mask_bool]
+
+        contours_local, _ = cv2.findContours(local_cookie_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours_local: continue
+
+        best_cnt = max(contours_local, key=cv2.contourArea)
+        if cv2.contourArea(best_cnt) < 200: continue
+
+        rect = cv2.minAreaRect(best_cnt)
+        M = cv2.moments(best_cnt)
+        if M["m00"] == 0: continue
+        cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+
+        width, height = rect[1][0], rect[1][1]
+        aspect_ratio = max(width, height) / min(width, height) if min(width, height) > 0 else 1.0
+
+        if aspect_ratio >= 1.5:
+            pts = best_cnt.reshape(-1, 2).astype(np.float64)
+            _, eigenvectors = cv2.PCACompute(pts, mean=None)
+            vx, vy = eigenvectors[0][0], eigenvectors[0][1]
+            if vy > 0: vx, vy = -vx, -vy
+            yaw_deg = math.degrees(math.atan2(vx, -vy))
+        else:
+            box_pts = cv2.boxPoints(rect)
+            v1, v2 = box_pts[1] - box_pts[0], box_pts[2] - box_pts[1]
+            dx, dy = (v1[0], v1[1]) if math.hypot(*v1) > math.hypot(*v2) else (v2[0], v2[1])
+            yaw_deg = math.degrees(math.atan2(abs(dx), abs(dy)))
+
+        yaw_deg = round(yaw_deg, 1)
+
+        # 3D 좌표 및 광학 축 거리 계산
+        x_m, y_m, top_z_m = xyz_map[cy, cx]
+        h_mm = dist_map[cy, cx] * 1000.0
+        center_z_mm = (top_z_m * 1000.0) + (h_mm / 2.0)
+        axis_dist_m = float(np.sqrt(x_m**2 + y_m**2))
+
+        real_yolo_id = obj.get("class_id", obj.get("cls", global_idx))
+
+        # ★ 로봇 파이프라인 호환성을 위해 Coarse 규격과 100% 동일한 Key 부여
+        item = {
+            "global_idx": global_idx,
+            "yolo_id": real_yolo_id,
+            "class_name": raw_name,
+            "axis_dist_m": axis_dist_m,
+            "axis_dist_mm": axis_dist_m * 1000.0,
+            "depth_m": float(center_z_mm / 1000.0),
+            "x_m": float(x_m),
+            "y_m": float(y_m),
+            "z_m": float(center_z_mm / 1000.0),
+            "x_mm": float(x_m * 1000.0),
+            "y_mm": float(y_m * 1000.0),
+            "z_mm": float(center_z_mm),
+            "top_z_mm": float(top_z_m * 1000.0),
+            "object_height_mm": float(h_mm),
+            "roll_deg": 180.0,  # Top-down 고정 RPY 호환성 유지
+            "pitch_deg": 0.0,
+            "yaw_deg": float(yaw_deg),
+            "aspect_ratio": float(aspect_ratio),
+            "uv_center": (cx, cy),
+            "contour": best_cnt,
+            "object_ref": obj
+        }
+
+        obj["fine_pose"] = item
+        fine_pose_table.append(item)
+
+        cv2.drawContours(result_img, [best_cnt], -1, (0, 255, 0), 2)
+        cv2.circle(result_img, (cx, cy), 4, (255, 0, 0), -1)
+        cv2.drawContours(result_img, [np.intp(cv2.boxPoints(rect))], 0, (255, 165, 0), 2)
+        cv2.putText(result_img, f"YOLO_ID:{real_yolo_id} ({raw_name})", (cx - 40, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(result_img, f"Yaw: {yaw_deg}d", (cx - 40, cy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # --- 테이블 정렬 및 class_index 빌드 ---
+    fine_pose_table = sorted(fine_pose_table, key=lambda x: x["axis_dist_m"])
+    fine_class_index = {}
+
+    for item in fine_pose_table:
+        cls = item["class_name"]
+        if cls not in fine_class_index: fine_class_index[cls] = []
+        fine_class_index[cls].append(item)
+
+    for cls, items in fine_class_index.items():
+        items.sort(key=lambda x: x["axis_dist_m"])
+        for local_id, item in enumerate(items): item["local_id"] = local_id
+
+    if V_visualize:
+        cv2.drawMarker(result_img, (int(intrinsics.ppx), int(intrinsics.ppy)), (255, 255, 0), cv2.MARKER_CROSS, 20, 2)
+        plt.figure(figsize=(12, 8))
+        plt.imshow(result_img)
+        plt.title("Masterpiece Contours + YOLO ID Bind")
+        plt.axis("off")
+        plt.show()
+
+    return fine_pose_table, fine_class_index
+
 def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
 
     if color_rgb is None or depth is None or intrinsics is None or scale is None:
