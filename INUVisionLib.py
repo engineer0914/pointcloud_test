@@ -4124,6 +4124,178 @@ def visualize_class_pose_on_rgb(
     return vis_rgb, selected_items
 
 
+def dilate_final_objects(
+    final_obj_fine,
+    image_shape,
+    kernel_size=7,
+    iterations=1,
+    kernel_type="ellipse",
+    visualize=False,
+    color_img_bgr=None
+):
+    """
+    final_obj_fine 안의 객체별 mask에 dilation 팽창 연산을 적용하는 함수.
+
+    Args:
+        final_obj_fine (list): 객체 리스트. 각 obj는 obj["mask"]를 가져야 함.
+        image_shape (tuple): 이미지 크기. 예: color_img_bgr.shape[:2]
+        kernel_size (int): 팽창 커널 크기. 3, 5, 7, 9 등 홀수 권장.
+        iterations (int): dilation 반복 횟수.
+        kernel_type (str): "ellipse" 또는 "rect".
+        visualize (bool): 결과 시각화 여부.
+        color_img_bgr (ndarray): 원본 BGR 이미지. overlay 시각화용.
+
+    Returns:
+        dilated_objects (list): dilation 적용된 객체 리스트
+        mask_before_all (ndarray): dilation 전 전체 통합 마스크, 0/1
+        mask_after_all (ndarray): dilation 후 전체 통합 마스크, 0/1
+        vis_img (ndarray): dilation contour가 그려진 BGR 이미지 또는 None
+    """
+
+    h, w = image_shape[:2]
+
+    # 원본 final_obj_fine을 보존하려고 deepcopy
+    dilated_objects = copy.deepcopy(final_obj_fine)
+
+    mask_before_all = np.zeros((h, w), dtype=np.uint8)
+    mask_after_all = np.zeros((h, w), dtype=np.uint8)
+
+    vis_img = color_img_bgr.copy() if color_img_bgr is not None else None
+
+    # kernel size는 홀수 권장
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+
+    if kernel_type == "ellipse":
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (kernel_size, kernel_size)
+        )
+    elif kernel_type == "rect":
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (kernel_size, kernel_size)
+        )
+    else:
+        raise ValueError("kernel_type은 'ellipse' 또는 'rect'만 가능합니다.")
+
+    for idx, obj in enumerate(dilated_objects):
+        if "mask" not in obj or obj["mask"] is None:
+            print(f"[WARNING] obj {idx}: mask 없음. skip")
+            continue
+
+        original_mask = (np.asarray(obj["mask"]) > 0).astype(np.uint8)
+
+        # 혹시 크기 안 맞으면 보정
+        if original_mask.shape[:2] != (h, w):
+            original_mask = cv2.resize(
+                original_mask,
+                (w, h),
+                interpolation=cv2.INTER_NEAREST
+            )
+            original_mask = (original_mask > 0).astype(np.uint8)
+
+        # dilation 적용
+        dilated_mask = cv2.dilate(
+            original_mask,
+            kernel,
+            iterations=iterations
+        )
+        dilated_mask = (dilated_mask > 0).astype(np.uint8)
+
+        # 객체별 mask 교체
+        obj["mask_before_dilation"] = original_mask.astype(bool)
+        obj["mask"] = dilated_mask.astype(bool)
+
+        # 디버그 정보 저장
+        obj["dilation_kernel_size"] = kernel_size
+        obj["dilation_iterations"] = iterations
+        obj["mask_area_before_dilation"] = int(np.count_nonzero(original_mask))
+        obj["mask_area_after_dilation"] = int(np.count_nonzero(dilated_mask))
+
+        # 전체 마스크 누적
+        mask_before_all = np.logical_or(
+            mask_before_all,
+            original_mask > 0
+        ).astype(np.uint8)
+
+        mask_after_all = np.logical_or(
+            mask_after_all,
+            dilated_mask > 0
+        ).astype(np.uint8)
+
+        print(
+            f"[DILATE] obj {idx} | {obj.get('class_name', 'N/A')} | "
+            f"area {np.count_nonzero(original_mask)} -> {np.count_nonzero(dilated_mask)} px | "
+            f"kernel={kernel_size}, iter={iterations}"
+        )
+
+        # overlay용 contour
+        if vis_img is not None:
+            dilated_255 = (dilated_mask * 255).astype(np.uint8)
+            contours, _ = cv2.findContours(
+                dilated_255,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            cv2.drawContours(vis_img, contours, -1, (0, 255, 0), 2)
+
+            if len(contours) > 0:
+                largest_contour = max(contours, key=cv2.contourArea)
+                x, y, bw, bh = cv2.boundingRect(largest_contour)
+
+                cv2.putText(
+                    vis_img,
+                    f"{idx}:{obj.get('class_name', 'N/A')}",
+                    (x, max(y - 8, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 255),
+                    1
+                )
+
+    if visualize:
+        before_vis = mask_before_all * 255
+        after_vis = mask_after_all * 255
+
+        if color_img_bgr is not None:
+            color_img_rgb = cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB)
+            vis_img_rgb = cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)
+
+            fig, axes = plt.subplots(1, 4, figsize=(20, 6))
+
+            axes[0].imshow(color_img_rgb)
+            axes[0].set_title("Original")
+            axes[0].axis("off")
+
+            axes[1].imshow(before_vis, cmap="gray")
+            axes[1].set_title("Before Dilation")
+            axes[1].axis("off")
+
+            axes[2].imshow(after_vis, cmap="gray")
+            axes[2].set_title(f"After Dilation k={kernel_size}, iter={iterations}")
+            axes[2].axis("off")
+
+            axes[3].imshow(vis_img_rgb)
+            axes[3].set_title("Dilated Contours Overlay")
+            axes[3].axis("off")
+
+        else:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+            axes[0].imshow(before_vis, cmap="gray")
+            axes[0].set_title("Before Dilation")
+            axes[0].axis("off")
+
+            axes[1].imshow(after_vis, cmap="gray")
+            axes[1].set_title(f"After Dilation k={kernel_size}, iter={iterations}")
+            axes[1].axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+    return dilated_objects, mask_before_all, mask_after_all, vis_img
 
 ################################### 실행 함수
 
