@@ -1689,14 +1689,14 @@ def filter_overlapping_masks(results, overlap_threshold=0.70, img_shape=(640, 48
     else:
         print("⚠️ [WARN] 검출된 객체가 없습니다.")
 
-    # 4. 최종 결과 출력 및 전체 마스크 병합
-    print(f"\n✅ 최종 검출된 유효 객체/군집 수: {len(final_detected_objects)}개")
-    for obj in final_detected_objects:
-        print(f" - 🏷️ {obj['class_name']} (신뢰도: {obj['confidence']:.2f})")
-        final_combined_mask = np.logical_or(final_combined_mask, obj["mask"]).astype(np.uint8)
-
     # 5. 시각화 (옵션)
     if visualize:
+        # 4. 최종 결과 출력 및 전체 마스크 병합
+        print(f"\n✅ 최종 검출된 유효 객체/군집 수: {len(final_detected_objects)}개")
+        for obj in final_detected_objects:
+            print(f" - 🏷️ {obj['class_name']} (신뢰도: {obj['confidence']:.2f})")
+            final_combined_mask = np.logical_or(final_combined_mask, obj["mask"]).astype(np.uint8)
+
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         
         if len(results) > 0:
@@ -1704,11 +1704,11 @@ def filter_overlapping_masks(results, overlap_threshold=0.70, img_shape=(640, 48
         else:
             axes[0].text(0.5, 0.5, 'No Detections', ha='center', va='center', fontsize=15)
             
-        axes[0].set_title("Original YOLO Output (Messy Overlaps)")
+        axes[0].set_title("Original YOLO Output")
         axes[0].axis("off")
 
         axes[1].imshow(final_combined_mask, cmap='gray')
-        axes[1].set_title(f"Cleaned Masks ({len(final_detected_objects)} Objects)")
+        axes[1].set_title(f"nms Cleaned Masks ({len(final_detected_objects)} Objects)")
         axes[1].axis("off")
 
         plt.tight_layout()
@@ -1844,7 +1844,8 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
     """
     [STEP 3] OBB 비율(가로/세로) 및 3D 높이 마스크와의 교집합을 통해 객체의 오분류를 교정합니다.
     """
-    print("\n[INFO] 객체 마스크 기반 OBB 추출 및 물리적 조건 기반 ID 교정 중...")
+    if visualize:
+        print("\n[INFO] 객체 마스크 기반 OBB 추출 및 물리적 조건 기반 ID 교정 중...")
     
     vis_image = color_img_bgr.copy()
     h, w = color_img_bgr.shape[:2]
@@ -1873,27 +1874,6 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
         
         old_name = obj["class_name"]
 
-        #######################################################################
-        # 디버깅용 - 어디가 바뀌었는지 확인 가능
-        #         
-        # # 3. 분기 처리 및 교정
-        # if overlap_ratio > overlap_threshold:
-        #     # [A] 쌓인 객체 (높이 조건 충족)
-        #     mask_high_vis = np.logical_or(mask_high_vis, yolo_mask).astype(np.uint8)
-        #     if "2x2" in old_name:
-        #         new_name = old_name.replace("2x2", "4x2")
-        #         obj["class_name"] = f"[C]{new_name}"
-        #         print(f" ⚠️ [높이 교정] 쌓인 블록 감지! '{old_name}' -> '{obj['class_name']}'")
-        # else:
-        #     # [B] 바닥에 깔린 객체
-        #     mask_low_vis = np.logical_or(mask_low_vis, yolo_mask).astype(np.uint8)
-        #     if ("4x2" in old_name or "2x4" in old_name) and ratio <= ratio_threshold:
-        #         new_name = old_name.replace("4x2", "2x2").replace("2x4", "2x2")
-        #         obj["class_name"] = f"[C]{new_name}"
-        #         print(f" 🔍 [비율 교정] 짧은 블록 감지 (비율:{ratio:.2f}). '{old_name}' -> '{obj['class_name']}'")
-        #######################################################################
-
-        #######################################################################
         # 단순 이름 교정
         if overlap_ratio > overlap_threshold:
             # [A] 쌓인 객체 (높이 조건 충족)
@@ -1901,15 +1881,16 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
             if "2x2" in old_name:
                 new_name = old_name.replace("2x2", "4x2")
                 obj["class_name"] = f"{new_name}"
-                print(f" ⚠️ [높이 교정] 쌓인 블록 감지! '{old_name}' -> '{obj['class_name']}'")
+                if visualize:                
+                    print(f" ⚠️ [높이 교정] 쌓인 블록 감지! '{old_name}' -> '{obj['class_name']}'")
         else:
             # [B] 바닥에 깔린 객체
             mask_low_vis = np.logical_or(mask_low_vis, yolo_mask).astype(np.uint8)
             if ("4x2" in old_name or "2x4" in old_name) and ratio <= ratio_threshold:
                 new_name = old_name.replace("4x2", "2x2").replace("2x4", "2x2")
                 obj["class_name"] = f"{new_name}"
-                print(f" 🔍 [비율 교정] 짧은 블록 감지 (비율:{ratio:.2f}). '{old_name}' -> '{obj['class_name']}'")
-        #######################################################################
+                if visualize:
+                    print(f" 🔍 [비율 교정] 짧은 블록 감지 (비율:{ratio:.2f}). '{old_name}' -> '{obj['class_name']}'")
 
         # 4. 시각화 데이터 렌더링
         box = np.intp(cv2.boxPoints(rect))
@@ -1946,7 +1927,8 @@ def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_sc
     Depth 맵을 3D Point Cloud로 변환 후, 바닥(Plane)을 찾아 지정된 높이 이상 
     돌출된 객체만 추출하고 이를 2D 이미지로 마스킹하여 반환하는 통합 함수.
     """
-    print("\n[INFO] 3D 기반 돌출 객체 추출 및 2D 마스킹 파이프라인 시작...")
+    if visualize:
+        print("\n[INFO] 3D 기반 돌출 객체 추출 및 2D 마스킹 파이프라인 시작...")
     
     filtered_depth_img = cv2.medianBlur(depth_img, 5)
     
@@ -1997,7 +1979,8 @@ def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_sc
                 plane_normal = -plane_normal
                 d = -d
                 plane_model = (a, b, c, d)
-            print(f"✅ 바닥 평면 도출 성공: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
+            if visualize:
+                print(f"✅ 바닥 평면 도출 성공: {a:.3f}x + {b:.3f}y + {c:.3f}z + {d:.3f} = 0")
         else:
             print("⚠️ [WARN] 바닥 후보군 포인트 부족.")
             return None, None, None, None
