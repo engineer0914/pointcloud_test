@@ -21,7 +21,49 @@ import copy
 from scipy.spatial.transform import Rotation as R
 SCIPY_AVAILABLE = True
 
-
+CAMERA_PROFILES = {
+    # 1. 바닥(Floor) 모드: RANSAC 평면 검출용 (넓고 강하게)
+    "floor": {
+        "preset_id": 4,              # High Density (바닥 구멍 채우기)
+        "smooth_alpha": 0.5,
+        "smooth_delta": 20,          # 평면을 더 평평하게 다듬기 위해 낮춤
+        "min_dist": 0.30,            # 카메라 바로 앞 먼지/노이즈 무시
+        "max_dist": 3.00,            # 바닥까지만 보고 불필요한 원거리 컷
+        "target_laser_power": 360,   # 바닥 반사율 확보를 위해 최대 파워
+        "target_shift": 0,           # 정상 시력 구간
+        "roi_percent": 80,           # 화면 전체를 기준으로 노출 계산
+        "auto_awb_value": 1,
+        "depth_Units": 0.0001
+    },
+    
+    # 2. 근접 30cm 모드: 듀플로 픽킹용 (정밀하고 어둡게)
+    "macro_30": {
+    "preset_id": 4,              # High Accuracy 계열이면 3 유지, 안 맞으면 4도 테스트
+    "smooth_alpha": 0.6,         # 엣지 보존 위해 너무 낮게 하지 않음
+    "smooth_delta": 20,          # 50~100은 직각/얇은 부분을 뭉갤 수 있음
+    "min_dist": 0.08,
+    "max_dist": 0.32,            # 20cm 근처만 보기
+    "target_laser_power": 150,    # 너무 가까우면 150도 과할 수 있음
+    "target_shift": 20,          # 20cm 근거리용 시작값
+    "roi_percent": 15,           # 중앙 객체 기준 AE
+    "auto_awb_value": 1,
+    "depth_Units": 0.00001       # 근거리 전용. 불안정하면 0.0001로 복귀
+    },
+    
+    # 3. 원거리 50cm 모드: 접근 및 탐색용 (밸런스형)
+    "mid_50": {
+        "preset_id": 4,              # High Density
+        "smooth_alpha": 0.5,
+        "smooth_delta": 50,
+        "min_dist": 0.10,
+        "max_dist": 0.80,            # 작업대(테이블) 영역 정도까지만 컷
+        "target_laser_power": 250,   # 너무 세지도 약하지도 않은 중간 파워
+        "target_shift": 0,           # 50cm는 기본 시력 구간에 포함됨 (Shift 불필요)
+        "roi_percent": 40,           # 작업 영역인 중앙 40% 기준 노출
+        "auto_awb_value": 1,
+        "depth_Units": 0.0001        
+    }
+}
 
 # 카메라 설정 함수들
 
@@ -160,50 +202,6 @@ def load_rgb_calibration_from_folder(
         print("roi:", roi)
 
     return calib
-
-CAMERA_PROFILES = {
-    # 1. 바닥(Floor) 모드: RANSAC 평면 검출용 (넓고 강하게)
-    "floor": {
-        "preset_id": 4,              # High Density (바닥 구멍 채우기)
-        "smooth_alpha": 0.5,
-        "smooth_delta": 20,          # 평면을 더 평평하게 다듬기 위해 낮춤
-        "min_dist": 0.30,            # 카메라 바로 앞 먼지/노이즈 무시
-        "max_dist": 3.00,            # 바닥까지만 보고 불필요한 원거리 컷
-        "target_laser_power": 360,   # 바닥 반사율 확보를 위해 최대 파워
-        "target_shift": 0,           # 정상 시력 구간
-        "roi_percent": 80,           # 화면 전체를 기준으로 노출 계산
-        "auto_awb_value": 1,
-        "depth_Units": 0.0001
-    },
-    
-    # 2. 근접 30cm 모드: 듀플로 픽킹용 (정밀하고 어둡게)
-    "macro_30": {
-    "preset_id": 4,              # High Accuracy 계열이면 3 유지, 안 맞으면 4도 테스트
-    "smooth_alpha": 0.6,         # 엣지 보존 위해 너무 낮게 하지 않음
-    "smooth_delta": 20,          # 50~100은 직각/얇은 부분을 뭉갤 수 있음
-    "min_dist": 0.08,
-    "max_dist": 0.32,            # 20cm 근처만 보기
-    "target_laser_power": 150,    # 너무 가까우면 150도 과할 수 있음
-    "target_shift": 20,          # 20cm 근거리용 시작값
-    "roi_percent": 15,           # 중앙 객체 기준 AE
-    "auto_awb_value": 1,
-    "depth_Units": 0.00001       # 근거리 전용. 불안정하면 0.0001로 복귀
-    },
-    
-    # 3. 원거리 50cm 모드: 접근 및 탐색용 (밸런스형)
-    "mid_50": {
-        "preset_id": 4,              # High Density
-        "smooth_alpha": 0.5,
-        "smooth_delta": 50,
-        "min_dist": 0.20,
-        "max_dist": 0.80,            # 작업대(테이블) 영역 정도까지만 컷
-        "target_laser_power": 250,   # 너무 세지도 약하지도 않은 중간 파워
-        "target_shift": 0,           # 50cm는 기본 시력 구간에 포함됨 (Shift 불필요)
-        "roi_percent": 40,           # 작업 영역인 중앙 40% 기준 노출
-        "auto_awb_value": 1,
-        "depth_Units": 0.0001        
-    }
-}
 
 def get_realsense_ids():
     """
@@ -351,6 +349,124 @@ def configure_realsense(
     # 리턴 값에 thres_filter 추가!
     return pipeline, align, temp_filter, thres_filter
 
+# 컨트롤 실행부 함수들
+def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=10, visualize=False):
+    """
+    특정 리얼센스 카메라를 지정한 모드로 켜서 예열한 뒤, 핵심 비전 데이터를 추출하는 함수.
+    
+    Args:
+        serial_number (str): get_realsense_ids()로 찾은 기기 시리얼 번호
+        mode (str): "floor", "macro_30", "mid_50" 중 택 1
+        warmup_frames (int): 센서 안정화를 위해 버릴 초기 프레임 수
+        visualize (bool): 캡처된 결과(Color + Depth)를 Matplotlib으로 출력할지 여부
+        
+    Returns:
+        color_img_rgb (ndarray): RGB 포맷의 컬러 이미지 (YOLO, Open3D용)
+        depth_img (ndarray): Raw 뎁스 이미지
+        intrinsics (rs.intrinsics): 카메라 내부 파라미터 (3D 투영용)
+        depth_scale (float): 뎁스 단위를 미터(m)로 변환하기 위한 스케일 값 (매우 중요)
+    """
+
+    def make_depth_colormap_meters(
+        depth_img,
+        depth_scale,
+        min_m=0.08,
+        max_m=0.35,
+        colormap=cv2.COLORMAP_JET
+    ):
+        """
+        raw depth가 아니라 meter 값 기준으로 컬러맵 생성.
+        depth_units가 0.00001이든 0.0001이든 시각화가 일관됨.
+        """
+        depth_m = depth_img.astype(np.float32) * float(depth_scale)
+
+        valid = (depth_m > min_m) & (depth_m < max_m)
+
+        depth_norm = np.zeros_like(depth_img, dtype=np.uint8)
+
+        if np.count_nonzero(valid) > 0:
+            clipped = np.clip(depth_m, min_m, max_m)
+            depth_norm[valid] = (
+                (clipped[valid] - min_m) / (max_m - min_m) * 255.0
+            ).astype(np.uint8)
+
+        depth_colormap = cv2.applyColorMap(depth_norm, colormap)
+        depth_colormap_rgb = cv2.cvtColor(depth_colormap, cv2.COLOR_BGR2RGB)
+
+        # invalid는 검정
+        depth_colormap_rgb[~valid] = 0
+
+        return depth_colormap_rgb, depth_m
+
+    print(f"[{mode}] 모드로 카메라(ID: {serial_number}) 구동을 시작합니다...")
+
+    # 1. 프로필 파라미터 로드
+    profile_params = CAMERA_PROFILES.get(mode)
+    if profile_params is None:
+        raise ValueError(f"지원하지 않는 모드입니다: {mode}")
+        
+    profile_depth_units = profile_params.get("depth_Units", None)
+    
+    # 2. 카메라 파이프라인 설정 및 구동
+    pipeline, align, temp_filter, thres_filter = configure_realsense(
+        serial_number=serial_number, # 💡 주의: ivl 라이브러리 수정 필요 (아래 참고)
+        **profile_params
+    )
+    
+    intrinsics = None
+    color_img = None
+    depth_img = None
+    depth_scale = None
+    
+    try:
+        # 3. 센서 예열 (안정화)
+        if warmup_frames > 0:
+            print(f"🔥 센서 안정화 중... ({warmup_frames} 프레임 대기)")
+            for _ in range(warmup_frames):
+                pipeline.wait_for_frames()
+
+        depth_img, color_img, depth_scale, debug_info = get_aligned_frames_with_units(
+            pipeline=pipeline,
+            align=align,
+            temp_filter=temp_filter,
+            thres_filter=thres_filter,
+            profile_depth_units=profile_depth_units,
+            apply_filter=True
+        )
+            
+        intrinsics = get_aligned_intrinsics(pipeline)
+        
+        # 5. 시각화 (옵션)
+        if visualize and depth_img is not None and color_img is not None:
+            # 모드별 가시화 거리 설정
+            vis_ranges = {
+                "macro_30": (0.08, 0.35),
+                "mid_50": (0.15, 0.80),
+                "floor": (0.20, 3.00)
+            }
+            vis_min_m, vis_max_m = vis_ranges.get(mode, (0.20, 1.00))
+            
+            depth_colormap_rgb, _ = make_depth_colormap_meters(
+                depth_img=depth_img, depth_scale=depth_scale, 
+                min_m=vis_min_m, max_m=vis_max_m
+            )
+            
+            fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+            images = np.hstack((color_img, depth_colormap_rgb))
+            ax.imshow(images)
+            ax.axis("off")
+            ax.set_title(f"Capture Result | Mode: {mode} | Scale: {depth_scale:.6f}")
+            plt.show()
+
+    except Exception as e:
+        print(f"❌ 프레임 캡처 중 에러 발생: {e}")
+        
+    finally:
+        pipeline.stop()
+        print("✅ 카메라 스트리밍 안전 종료 완료.")
+        
+    return color_img, depth_img, intrinsics, depth_scale
+
 def get_aligned_intrinsics(pipeline):
     """
     현재 활성화된 파이프라인에서 정렬된(Aligned) 영상의 인트린직 정보를 반환합니다.
@@ -466,74 +582,6 @@ def get_aligned_frames_with_units(
 
     return depth_image, color_image, depth_scale_used, debug_info
 
-def get_aligned_frames(pipeline, align, temp_filter, thres_filter, apply_filter=True):
-    # """
-    # 카메라로부터 프레임을 받아 컬러 영상에 정렬된(Aligned) 뎁스 영상을 반환합니다.
-    # """
-    # # frames = pipeline.wait_for_frames()
-    # # aligned_frames = align.process(frames)
-    
-    # aligned_depth_frame = aligned_frames.get_depth_frame()
-    # color_frame = aligned_frames.get_color_frame()
-    
-    # if not aligned_depth_frame or not color_frame:
-    #     return None, None
-
-    # # 요청에 따라 포스트 프로세싱 필터 적용
-    # if apply_filter:
-    #     # 💡 보통 필요 없는 배경/가까운 물체를 먼저 날리고(Threshold) -> 잔상을 부드럽게(Temporal) 처리합니다.
-    #     aligned_depth_frame = thres_filter.process(aligned_depth_frame)
-    #     aligned_depth_frame = temp_filter.process(aligned_depth_frame)
-
-    # depth_image = np.asanyarray(aligned_depth_frame.get_data())
-    # color_image = np.asanyarray(color_frame.get_data())
-
-    # # 핵심: 실제 frame 기준 depth units 사용
-    # try:
-    #     frame_depth_units = aligned_depth_frame.as_depth_frame().get_units()
-    # except Exception:
-    #     frame_depth_units = None
-    
-    # return depth_image, color_image
-    return
-
-def make_depth_colormap_meters(
-    depth_img,
-    depth_scale,
-    min_m=0.08,
-    max_m=0.35,
-    colormap=cv2.COLORMAP_JET
-):
-    """
-    raw depth가 아니라 meter 값 기준으로 컬러맵 생성.
-    depth_units가 0.00001이든 0.0001이든 시각화가 일관됨.
-    """
-    depth_m = depth_img.astype(np.float32) * float(depth_scale)
-
-    valid = (depth_m > min_m) & (depth_m < max_m)
-
-    depth_norm = np.zeros_like(depth_img, dtype=np.uint8)
-
-    if np.count_nonzero(valid) > 0:
-        clipped = np.clip(depth_m, min_m, max_m)
-        depth_norm[valid] = (
-            (clipped[valid] - min_m) / (max_m - min_m) * 255.0
-        ).astype(np.uint8)
-
-    depth_colormap = cv2.applyColorMap(depth_norm, colormap)
-    depth_colormap_rgb = cv2.cvtColor(depth_colormap, cv2.COLOR_BGR2RGB)
-
-    # invalid는 검정
-    depth_colormap_rgb[~valid] = 0
-
-    return depth_colormap_rgb, depth_m
-
-def normalize_yaw_deg_180(angle_deg):
-    """
-    yaw를 [-180, 180) 범위로 정규화
-    """
-    yaw = (float(angle_deg) + 180.0) % 360.0 - 180.0
-    return yaw
 
 
 
@@ -1480,97 +1528,11 @@ def create_floor_anchored_3d_box(box_2d, intrinsics, plane_normal, d, max_h, col
     return line_set
 
 
-
-# 컨트롤 실행부 함수들
-def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=30, visualize=False):
-    """
-    특정 리얼센스 카메라를 지정한 모드로 켜서 예열한 뒤, 핵심 비전 데이터를 추출하는 함수.
-    
-    Args:
-        serial_number (str): get_realsense_ids()로 찾은 기기 시리얼 번호
-        mode (str): "floor", "macro_30", "mid_50" 중 택 1
-        warmup_frames (int): 센서 안정화를 위해 버릴 초기 프레임 수
-        visualize (bool): 캡처된 결과(Color + Depth)를 Matplotlib으로 출력할지 여부
-        
-    Returns:
-        color_img_rgb (ndarray): RGB 포맷의 컬러 이미지 (YOLO, Open3D용)
-        depth_img (ndarray): Raw 뎁스 이미지
-        intrinsics (rs.intrinsics): 카메라 내부 파라미터 (3D 투영용)
-        depth_scale (float): 뎁스 단위를 미터(m)로 변환하기 위한 스케일 값 (매우 중요)
-    """
-    print(f"[{mode}] 모드로 카메라(ID: {serial_number}) 구동을 시작합니다...")
-    
-    # 1. 프로필 파라미터 로드
-    profile_params = CAMERA_PROFILES.get(mode)
-    if profile_params is None:
-        raise ValueError(f"지원하지 않는 모드입니다: {mode}")
-        
-    profile_depth_units = profile_params.get("depth_Units", None)
-    
-    # 2. 카메라 파이프라인 설정 및 구동
-    pipeline, align, temp_filter, thres_filter = configure_realsense(
-        serial_number=serial_number, # 💡 주의: ivl 라이브러리 수정 필요 (아래 참고)
-        **profile_params
-    )
-    
-    intrinsics = None
-    color_img = None
-    depth_img = None
-    depth_scale = None
-    
-    try:
-        # 3. 센서 예열 (안정화)
-        if warmup_frames > 0:
-            print(f"🔥 센서 안정화 중... ({warmup_frames} 프레임 대기)")
-            for _ in range(warmup_frames):
-                pipeline.wait_for_frames()
-
-        depth_img, color_img, depth_scale, debug_info = get_aligned_frames_with_units(
-            pipeline=pipeline,
-            align=align,
-            temp_filter=temp_filter,
-            thres_filter=thres_filter,
-            profile_depth_units=profile_depth_units,
-            apply_filter=True
-        )
-            
-        intrinsics = get_aligned_intrinsics(pipeline)
-        
-        # 5. 시각화 (옵션)
-        if visualize and depth_img is not None and color_img is not None:
-            # 모드별 가시화 거리 설정
-            vis_ranges = {
-                "macro_30": (0.08, 0.35),
-                "mid_50": (0.15, 0.80),
-                "floor": (0.20, 3.00)
-            }
-            vis_min_m, vis_max_m = vis_ranges.get(mode, (0.20, 1.00))
-            
-            depth_colormap_rgb, _ = make_depth_colormap_meters(
-                depth_img=depth_img, depth_scale=depth_scale, 
-                min_m=vis_min_m, max_m=vis_max_m
-            )
-            
-            fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-            images = np.hstack((color_img, depth_colormap_rgb))
-            ax.imshow(images)
-            ax.axis("off")
-            ax.set_title(f"Capture Result | Mode: {mode} | Scale: {depth_scale:.6f}")
-            plt.show()
-
-    except Exception as e:
-        print(f"❌ 프레임 캡처 중 에러 발생: {e}")
-        
-    finally:
-        pipeline.stop()
-        print("✅ 카메라 스트리밍 안전 종료 완료.")
-        
-    return color_img, depth_img, intrinsics, depth_scale
+# 컨트롤 함수
 
 def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=False):
     """
-    YOLOv8 모델을 사용하여 특정 클래스에 대한 객체를 검출하고, 
-    여러 마스크를 하나의 단일 관심 영역(ROI) 마스크로 병합하는 함수.
+    YOLOv8 모델을 사용하여 특정 클래스에 대한 객체를 검출하고, 이진 마스크로 반환
     
     Args:
         model (YOLO): 로드된 YOLO 모델 객체 (예: YOLO("best.pt"))
@@ -1638,6 +1600,9 @@ def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=Fal
         plt.show()
 
     return results, mask_binary, vis_yolo
+
+    # YOLOv8 세그멘테이션 결과에서 겹치는 마스크를 병합하고 오검출을 정리하는 함수.
+    # 작은 객체의 마스크가 큰 객체의 마스크에 설정된 비율 이상 포함되면 오검출로 간주하고 억제(Suppression)합니다.
 
 def filter_overlapping_masks(results, overlap_threshold=0.70, img_shape=(640, 480), visualize=False):
     """
@@ -3352,13 +3317,6 @@ def generate_3d_obbs_from_hull_objects(
 
     return objects_out, vis_elements_3d, overlay_geometries_3d, vis_2d_rgb, obb_results
 
-def normalize_vec(v, eps=1e-9):
-    v = np.asarray(v, dtype=np.float64)
-    n = np.linalg.norm(v)
-    if n < eps:
-        return None
-    return v / n
-
 
 def rotation_matrix_to_rpy_xyz_deg(R_mat):
     """
@@ -3452,6 +3410,13 @@ def estimate_pose_axes_from_obb3d(
     Returns:
         pose_data dict
     """
+
+    def normalize_vec(v, eps=1e-9):
+        v = np.asarray(v, dtype=np.float64)
+        n = np.linalg.norm(v)
+        if n < eps:
+            return None
+        return v / n
 
     if obb_3d is None:
         return None
@@ -3560,6 +3525,8 @@ def normalize_class_name(name, remove_c_prefix=True, remove_side2=False):
         name = name.replace("_side2", "")
 
     return name
+
+
 
 
 def build_class_sorted_pose_index(
@@ -3924,20 +3891,6 @@ def visualize_3d_obb_results(
     }
 
 
-
-
-def normalize_class_name_for_query(name, remove_c_prefix=True, remove_side2=False):
-    name = str(name)
-
-    if remove_c_prefix:
-        name = name.replace("[C]", "")
-
-    if remove_side2:
-        name = name.replace("_side2", "")
-
-    return name
-
-
 def project_point_to_image(pt_3d, intrinsics):
     """
     3D point (camera frame, meter) -> 2D pixel
@@ -4009,6 +3962,17 @@ def visualize_class_pose_on_rgb(
         selected_items:
             실제로 그린 객체 item 리스트
     """
+
+    def normalize_class_name_for_query(name, remove_c_prefix=True, remove_side2=False):
+        name = str(name)
+
+        if remove_c_prefix:
+            name = name.replace("[C]", "")
+
+        if remove_side2:
+            name = name.replace("_side2", "")
+
+        return name
 
     query_name = normalize_class_name_for_query(
         target_class_name,
@@ -4178,7 +4142,7 @@ def visualize_class_pose_on_rgb(
 
 ################################### 실행 함수
 
-def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
+def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True, mode):
 
     if color_rgb is None or depth is None or intrinsics is None or scale is None:
         raise RuntimeError("RealSense 캡처 실패: color/depth/intrinsics/scale 중 None이 있습니다.")
@@ -4458,7 +4422,11 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         verbose=True
     )
 
+    if mode:
+        fine 함수 추가
+
     return pose_table, class_index
+
 
 def search_assembly(
     color_rgb,
@@ -4584,7 +4552,7 @@ def search_assembly(
         center_xyz_mm = center_xyz_m * 1000.0
 
         # 2D contour PCA 기준 yaw
-        yaw_deg = normalize_yaw_deg_180(obj.get("angle_deg", 0.0))
+        yaw_deg = (float(obj.get("angle_deg", 0.0)) + 180.0) % 360.0 - 180.0
 
         # assembly 모드는 바닥 기준 덩어리이므로 roll/pitch는 일단 0으로 둠
         # 나중에 plane normal 기반으로 확장 가능
@@ -4651,9 +4619,6 @@ def search_assembly(
         )
 
     return pose_table, class_index
-
-
-
 
 def search_assembly_fine(color_rgb, depth, intrinsics, scale, V_visualize=True):
     img_rgb = color_rgb.copy()

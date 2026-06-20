@@ -29,10 +29,15 @@ class VisionManager:
 
         # ID -> 클래스 이름 매핑 딕셔너리
         self.id_to_class = {
-            1: "2x2_red", 2: "2x2_green", 3: "2x2_blue", 4: "2x2_yellow",
-            5: "4x2_red", 6: "4x2_green", 7: "4x2_blue", 8: "4x2_yellow",
+            1: "2x2_red", 
+            2: "2x2_green", 
+            3: "2x2_blue", 
+            4: "2x2_yellow",
+            5: "4x2_red", 
+            6: "4x2_green", 
+            7: "4x2_blue", 
+            8: "4x2_yellow",
 
-            # assembly / depth blob mode
             999: "assembly",
             888: "assembly_fine",
 
@@ -147,6 +152,7 @@ class VisionManager:
 
         return self.pose_table, self.class_index
 
+
     # ==========================================
     # 함수 3. 서치 결과 기반 위치 반환 함수 (자동 탐색 라우팅 포함)
     # ==========================================
@@ -160,11 +166,9 @@ class VisionManager:
 
         print(f"\n[INFO] 타겟 ID [{target_id}] ➔ 클래스명 ['{target_class_name}'] 변환 완료")
 
-        # ------------------------------------------------------------
-        # [NEW] 타겟 ID에 따른 서치 알고리즘 자동 실행 (Smart Routing)
-        # ------------------------------------------------------------
         if target_id == 888:
             self.run_search_assembly_fine(visualize=visualize)
+
         elif target_id == 999:
             self.run_search_assembly(visualize=visualize)
             
