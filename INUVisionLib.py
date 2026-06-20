@@ -4125,7 +4125,7 @@ def visualize_class_pose_on_rgb(
 
 ################################### 실행 함수
 
-def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True, mode):
+def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
 
     if color_rgb is None or depth is None or intrinsics is None or scale is None:
         raise RuntimeError("RealSense 캡처 실패: color/depth/intrinsics/scale 중 None이 있습니다.")
@@ -4405,8 +4405,8 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True, mode):
         verbose=True
     )
 
-    if mode:
-        fine 함수 추가
+    # if mode:
+    #     fine 함수 추가
 
     return pose_table, class_index
 
