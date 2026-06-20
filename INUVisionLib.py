@@ -4675,7 +4675,7 @@ def search_assembly_fine(color_rgb, depth, intrinsics, scale, V_visualize=True):
     # 0-3. 바닥 평면으로부터의 Z축 거리(높이) 계산
     dist_map = compute_plane_distance_map(xyz_map, valid_mask, best_plane)
 
-# 0-4. 바닥에서 1cm(0.01m) 이상 튀어나온 영역만 마스킹 (1cm 미만은 바닥으로 간주)
+    # 0-4. 바닥에서 1cm(0.01m) 이상 튀어나온 영역만 마스킹 (1cm 미만은 바닥으로 간주)
     ransac_mask = (dist_map > 0.010).astype(np.uint8) * 255
     
     # 노이즈를 살짝 지워주기 위해 모폴로지 열기(Open) 적용
