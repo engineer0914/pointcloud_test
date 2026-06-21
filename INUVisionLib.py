@@ -14,7 +14,6 @@ import pyrealsense2 as rs
 import matplotlib.pyplot as plt
 from matplotlib import cm
 import pandas as pd
-import re
 import numpy as np
 import copy
 
@@ -240,7 +239,8 @@ def configure_realsense(
         target_shift = 0, 
         roi_percent=80, 
         auto_awb_value=1,
-        depth_Units=0.0001
+        depth_Units=0.0001,
+        visualize=True
         ):
     
     pipeline = rs.pipeline()
@@ -267,20 +267,24 @@ def configure_realsense(
     # 3. 비주얼 프리셋 설정
     if depth_sensor.supports(rs.option.visual_preset):
         depth_sensor.set_option(rs.option.visual_preset, preset_id)
-        print(f"✅ Preset 설정 완료: {depth_sensor.get_option_value_description(rs.option.visual_preset, preset_id)}")
+        if visualize:
+            print(f"✅ Preset 설정 완료: {depth_sensor.get_option_value_description(rs.option.visual_preset, preset_id)}")
 
     # 4. 뎁스 유닛(Depth Unit) 설정
     if depth_sensor.supports(rs.option.depth_units):
         try:
             depth_sensor.set_option(rs.option.depth_units, depth_Units)
-            print(f"✅ Depth Unit 설정 완료: {depth_sensor.get_option(rs.option.depth_units)}")
+            if visualize:
+                print(f"✅ Depth Unit 설정 완료: {depth_sensor.get_option(rs.option.depth_units)}")
         except Exception as e:
-            print(f"⚠️ Depth Unit 설정 실패: {e}")
+            if visualize:
+                print(f"⚠️ Depth Unit 설정 실패: {e}")
 
     # 5. 자동 노출(Auto Exposure) 활성화 및 ROI 설정
     if depth_sensor.supports(rs.option.enable_auto_exposure):
         depth_sensor.set_option(rs.option.enable_auto_exposure, 1)
-        print("✅ 뎁스 센서 자동 노출(AE) 스위치 ON")
+        if visualize:
+            print("✅ 뎁스 센서 자동 노출(AE) 스위치 ON")
 
     roi_sensor = rs.roi_sensor(depth_sensor)
     if roi_sensor:
@@ -298,13 +302,15 @@ def configure_realsense(
         
         # 기기에 ROI 세팅 적용
         roi_sensor.set_region_of_interest(roi)
-        print(f"✅ Depth ROI 영역 설정 완료 (중앙 {roi_percent}% / X: {roi.min_x}~{roi.max_x}, Y: {roi.min_y}~{roi.max_y})")
+        if visualize:
+            print(f"✅ Depth ROI 영역 설정 완료 (중앙 {roi_percent}% / X: {roi.min_x}~{roi.max_x}, Y: {roi.min_y}~{roi.max_y})")
 
     # 레이저 파워 설정
     # 추천값 -> 60cm 이상 바닥: 360 (최대치) / 30cm 코앞: 약 150
     if depth_sensor.supports(rs.option.laser_power):
         depth_sensor.set_option(rs.option.laser_power, target_laser_power)
-        print(f"✅ 레이저 파워 설정 완료: {target_laser_power}")
+        if visualize:
+            print(f"✅ 레이저 파워 설정 완료: {target_laser_power}")
 
     # 🎯 디스패리티 시프트 설정 (고급 모드 사용)
     # 추천값 -> 60cm 이상 바닥: 0 (기본값) / 30cm 코앞: 50 ~ 100 사이 조절
@@ -312,7 +318,8 @@ def configure_realsense(
         depth_table = advnc_mode.get_depth_table()
         depth_table.disparityShift = target_shift
         advnc_mode.set_depth_table(depth_table)
-        print(f"✅ Disparity Shift 설정 완료: {target_shift}")
+        if visualize:
+            print(f"✅ Disparity Shift 설정 완료: {target_shift}")
 
     # 6. Temporal Filter 설정
     temp_filter = rs.temporal_filter()
@@ -322,7 +329,8 @@ def configure_realsense(
     temp_filter.set_option(rs.option.filter_smooth_delta, smooth_delta)
     # # hole filling 옵션: 누적된 데이터로 구멍을 강제로 메웁니다 (0~8)
     # temp_filter.set_option(rs.option.holes_fill, 3)
-    print(f"✅ Temporal Filter 설정 완료")
+    if visualize:
+        print(f"✅ Temporal Filter 설정 완료")
 
     # ==========================================
     # 💡 7. Threshold Filter (거리 제한) 설정
@@ -330,13 +338,15 @@ def configure_realsense(
     thres_filter = rs.threshold_filter()
     thres_filter.set_option(rs.option.min_distance, min_dist)
     thres_filter.set_option(rs.option.max_distance, max_dist)
-    print(f"✅ Threshold Filter 설정 완료 (최소: {min_dist}m, 최대: {max_dist}m)")
+    if visualize:
+        print(f"✅ Threshold Filter 설정 완료 (최소: {min_dist}m, 최대: {max_dist}m)")
 
 
     # 🎯 컬러 센서 자동 화이트 밸런스(AWB) 설정
     if color_sensor.supports(rs.option.enable_auto_white_balance):
         color_sensor.set_option(rs.option.enable_auto_white_balance, auto_awb_value)
-        print(f"✅ 컬러 센서 자동 화이트 밸런스(AWB) {'ON' if auto_awb_value == 1 else 'OFF'}")
+        if visualize:
+            print(f"✅ 컬러 센서 자동 화이트 밸런스(AWB) {'ON' if auto_awb_value == 1 else 'OFF'}")
 
     # # (선택) 수동으로 색온도를 고정하고 싶을 때의 예시
     # if color_sensor.supports(rs.option.enable_auto_white_balance):
@@ -411,8 +421,9 @@ def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=10, visua
     
     # 2. 카메라 파이프라인 설정 및 구동
     pipeline, align, temp_filter, thres_filter = configure_realsense(
-        serial_number=serial_number, # 💡 주의: ivl 라이브러리 수정 필요 (아래 참고)
-        **profile_params
+        serial_number=serial_number,
+        **profile_params,
+        visualize=visualize
     )
     
     intrinsics = None
@@ -2219,7 +2230,7 @@ def fuse_yolo_and_generate_3d_obbs(detected_objects, refined_mask_01, mask_40mm_
         obj_pcd.paint_uniform_color(obj_color)
         vis_elements_3d.append(obj_pcd)
 
-        # 3D OBB 및 좌표계 (ivl 라이브러리 내 함수 사용)
+        # 3D OBB 및 좌표계
         box_2d = np.intp(cv2.boxPoints(rect))
         box_3d, axes_3d = create_floor_anchored_3d_box_with_axes(box_2d, intrinsics, plane_normal, d, max_h, obj_color, axis_size=0.03)
         
@@ -2780,7 +2791,8 @@ def build_floor_scene_data_from_depth(
             바닥으로 판정된 점들을 plane 위에 투영한 Open3D point cloud
     """
 
-    print("\n[INFO] Convex Hull 객체 마스크 제외 후 바닥 평면 재추정 중...")
+    if visualize:
+        print("\n[INFO] Convex Hull 객체 마스크 제외 후 바닥 평면 재추정 중...")
 
     h, w = depth_img.shape[:2]
 
@@ -3095,7 +3107,8 @@ def generate_3d_obbs_from_hull_objects(
             2D OBB 표시 이미지
     """
 
-    print("\n[INFO] Convex Hull mask 기준 3D OBB 생성 중...")
+    if visualize_2d:
+        print("\n[INFO] Convex Hull mask 기준 3D OBB 생성 중...")
 
     objects_out = copy.deepcopy(objects)
 
@@ -3283,16 +3296,16 @@ def generate_3d_obbs_from_hull_objects(
             cv2.LINE_AA
         )
 
-    print("\n[3D OBB 중심 좌표]")
-    for item in obb_results:
-        c = item["center_3d_mm"]
-        print(
-            f" - idx {item['idx']:02d} | {item['class_name']} | "
-            f"center(mm)=({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}) | "
-            f"h={item['height_mm']:.1f}mm | points={item['num_points']}"
-        )
-
     if visualize_2d:
+        print("\n[3D OBB 중심 좌표]")
+        for item in obb_results:
+            c = item["center_3d_mm"]
+            print(
+                f" - idx {item['idx']:02d} | {item['class_name']} | "
+                f"center(mm)=({c[0]:.1f}, {c[1]:.1f}, {c[2]:.1f}) | "
+                f"h={item['height_mm']:.1f}mm | points={item['num_points']}"
+            )
+
         plt.figure(figsize=(12, 8))
         plt.imshow(vis_2d_rgb)
         plt.title("2D OBB + 3D Center Coordinates")
@@ -3495,8 +3508,6 @@ def estimate_pose_axes_from_obb3d(
 
     return pose_data
 
-
-
 def normalize_class_name(name, remove_c_prefix=True, remove_side2=False):
     """
     '[C]2x2_red_side2' 같은 이름을 정리.
@@ -3510,9 +3521,6 @@ def normalize_class_name(name, remove_c_prefix=True, remove_side2=False):
         name = name.replace("_side2", "")
 
     return name
-
-
-
 
 def build_class_sorted_pose_index(
     objects_obb,
@@ -3727,7 +3735,6 @@ def get_nearest_6d_pose_by_class(
 
     return result_6d
 
-
 def visualize_3d_obb_results(
     vis_3d,
     overlay_3d,
@@ -3798,9 +3805,6 @@ def visualize_3d_obb_results(
                 "final_overlay_elements": final_overlay_elements
             }
     """
-
-    import cv2
-    import open3d as o3d
 
     rgb_pcd = None
     final_overlay_elements = None
@@ -3875,7 +3879,6 @@ def visualize_3d_obb_results(
         "final_overlay_elements": final_overlay_elements
     }
 
-
 def project_point_to_image(pt_3d, intrinsics):
     """
     3D point (camera frame, meter) -> 2D pixel
@@ -3887,7 +3890,6 @@ def project_point_to_image(pt_3d, intrinsics):
     u = int(round((x * intrinsics.fx / z) + intrinsics.ppx))
     v = int(round((y * intrinsics.fy / z) + intrinsics.ppy))
     return (u, v)
-
 
 def visualize_class_pose_on_rgb(
     class_index,
@@ -4123,7 +4125,6 @@ def visualize_class_pose_on_rgb(
 
     return vis_rgb, selected_items
 
-
 def dilate_final_objects(
     final_obj_fine,
     image_shape,
@@ -4181,7 +4182,8 @@ def dilate_final_objects(
 
     for idx, obj in enumerate(dilated_objects):
         if "mask" not in obj or obj["mask"] is None:
-            print(f"[WARNING] obj {idx}: mask 없음. skip")
+            if visualize:
+                print(f"[WARNING] obj {idx}: mask 없음. skip")
             continue
 
         original_mask = (np.asarray(obj["mask"]) > 0).astype(np.uint8)
@@ -4224,11 +4226,12 @@ def dilate_final_objects(
             dilated_mask > 0
         ).astype(np.uint8)
 
-        print(
-            f"[DILATE] obj {idx} | {obj.get('class_name', 'N/A')} | "
-            f"area {np.count_nonzero(original_mask)} -> {np.count_nonzero(dilated_mask)} px | "
-            f"kernel={kernel_size}, iter={iterations}"
-        )
+        if visualize:
+            print(
+                f"[DILATE] obj {idx} | {obj.get('class_name', 'N/A')} | "
+                f"area {np.count_nonzero(original_mask)} -> {np.count_nonzero(dilated_mask)} px | "
+                f"kernel={kernel_size}, iter={iterations}"
+            )
 
         # overlay용 contour
         if vis_img is not None:
@@ -4444,7 +4447,7 @@ def fine_correct(final_obj_fine,
     # ====================================================================
 
 
-# ============================================================
+    # ============================================================
     # Step 9: 쿠키 틀 바인딩 및 규격화된 pose_table 생성
     # ============================================================
     result_img = color_rgb.copy()
@@ -4471,17 +4474,108 @@ def fine_correct(final_obj_fine,
         width, height = rect[1][0], rect[1][1]
         aspect_ratio = max(width, height) / min(width, height) if min(width, height) > 0 else 1.0
 
+        # ----------------------------------------------------------------
+        # [NEW] 제안하신 PCA 단축 기반 초정밀 각도 추출 로직 (길쭉한 블록)
+        # ----------------------------------------------------------------
         if aspect_ratio >= 1.5:
+            # 1. PCA 수행: 윤곽선 점들의 분포 분석
             pts = best_cnt.reshape(-1, 2).astype(np.float64)
             _, eigenvectors = cv2.PCACompute(pts, mean=None)
-            vx, vy = eigenvectors[0][0], eigenvectors[0][1]
-            if vy > 0: vx, vy = -vx, -vy
-            yaw_deg = math.degrees(math.atan2(vx, -vy))
+
+            # eigenvectors[0]는 장축(가장 긴 쪽) 벡터, eigenvectors[1]는 단축(짧은 쪽) 벡터
+            major_v = eigenvectors[0]
+            minor_v = eigenvectors[1]  # <--- [핵심] 단축 벡터 선택
+
+            # 2. 중심에서 나가는 단축의 두 방향 생성
+            ray_1 = minor_v        # 방향 1
+            ray_2 = -minor_v       # 방향 2 (반대)
+
+            # 3. 두 방향 중 Y 성분이 더 작은(즉, 영상 좌표계 위쪽을 향하는) 선분 선택
+            # (ray_1[1] 과 ray_2[1]의 부호를 비교)
+            if ray_1[1] < ray_2[1]:
+                chosen_v = ray_1
+            else:
+                chosen_v = ray_2
+
+            # 4. 선택된 위쪽 단축 선분이 기준선(수직 위쪽, -Y)과 이루는 각도 계산
+            # math.atan2(x, -y) 공식을 쓰면 수직 위쪽을 0도로 삼아 [우측 갸우뚱=+, 좌측 갸우뚱=-] 각도가 나옴
+            yaw_deg = math.degrees(math.atan2(chosen_v[0], -chosen_v[1]))
+
+
+            # --- [시각화 검증용 드로잉] ---
+            if result_img is not None:
+                # ① 객체 무게중심(cx, cy)은 '빨간색 점'
+                p_base = np.array([cx, cy])
+                cv2.circle(result_img, tuple(p_base), 4, (0, 0, 255), -1)
+
+                # ② 위로 뻗은 Y축 평행 기준선(-Y 방향)은 '노란색 선'
+                cv2.line(result_img, tuple(p_base), (int(cx), int(cy - 40)), (0, 255, 255), 1)
+
+                # ③ 알고리즘이 선택한 위쪽 단축 선분은 '하늘색 두꺼운 선'
+                # (끝점을 잘 보이게 하기 위해 벡터 크기를 30픽셀로 스케일업)
+                p_end = p_base + (chosen_v * 30)
+                cv2.line(result_img, tuple(p_base), tuple(p_end.astype(int)), (0, 0, 0), 7)
+
+                # ④ (비교용) 장축 방향을 '연한 마젠타색 선'으로 표시 (선택되지 않음)
+                p_major_end = p_base + (major_v * 50)
+                cv2.line(result_img, tuple(p_base), tuple(p_major_end.astype(int)), (255, 0, 255), 1, cv2.LINE_AA)
+
         else:
-            box_pts = cv2.boxPoints(rect)
-            v1, v2 = box_pts[1] - box_pts[0], box_pts[2] - box_pts[1]
-            dx, dy = (v1[0], v1[1]) if math.hypot(*v1) > math.hypot(*v2) else (v2[0], v2[1])
-            yaw_deg = math.degrees(math.atan2(abs(dx), abs(dy)))
+            box_pts = cv2.boxPoints(rect)  # 사각형의 4개 꼭짓점 좌표 [shape: (4, 2)]
+
+            # 1. 영상 좌표계 기준 Y값이 '가장 높은(즉, 화면상 제일 밑바닥에 있는)' 꼭짓점 찾기
+            max_y_idx = int(np.argmax(box_pts[:, 1]))
+            p_base = box_pts[max_y_idx]
+
+            # 2. p_base와 연결된 양쪽 인접 꼭짓점 2개 구하기 (OpenCV는 꼭짓점이 순서대로 배열되어 있음)
+            p_A = box_pts[(max_y_idx - 1) % 4]
+            p_B = box_pts[(max_y_idx + 1) % 4]
+
+            # 3. p_base에서 출발하여 p_A, p_B로 향하는 두 개의 선분 벡터 생성
+            v_A = p_A - p_base
+            v_B = p_B - p_base
+
+            # 4. Y축 평행 기준선 벡터: p_base에서 '반대편 위쪽(-Y 방향)'으로 똑바로 뻗은 벡터 (0, -1)
+            # math.atan2(x, -y) 공식을 쓰면 (0, -1) 벡터를 0도로 삼아 [우측 갸우뚱=+, 좌측 갸우뚱=-] 각도가 나옴
+            angle_A = math.degrees(math.atan2(v_A[0], -v_A[1]))
+            angle_B = math.degrees(math.atan2(v_B[0], -v_B[1]))
+
+            # 5. Y축 평행선과 이루는 '절대 각도(abs)'가 더 짧은 쪽을 진짜 자세 각도로 채택!
+            if abs(angle_A) < abs(angle_B):
+                yaw_deg = angle_A
+                chosen_p = p_A   # 시각화 강조용
+            else:
+                yaw_deg = angle_B
+                chosen_p = p_B
+
+            # (선택) 만약 사용하는 로봇 제어기가 [왼쪽 갸우뚱=(+)], [오른쪽 갸우뚱=(-)] 라면 아래 주석 해제
+            # yaw_deg = -yaw_deg
+
+            # ----------------------------------------------------------------
+            # [NEW] 검은선을 '객체 정중앙'에서 뻗어나가도록 평행 이동
+            # ----------------------------------------------------------------
+            # 1. 사각형의 정중앙 좌표 (minAreaRect가 뱉는 도심값)
+            p_center = np.array(rect[0])
+
+            # 2. 알고리즘이 선택한 변의 '순수 방향 벡터' (길이와 기울기 정보)
+            v_chosen = chosen_p - p_base
+
+            # 3. 정중앙(p_center)에서 출발하여 v_chosen 방향으로 뻗어나간 끝점
+            p_center_end = p_center + v_chosen
+
+
+            # --- [시각화 드로잉 업데이트] ---
+            # ① 바닥 기준점(p_base)은 '초록색 점' (유지)
+            cv2.circle(result_img, tuple(p_base.astype(int)), 5, (0, 255, 0), -1)
+
+            # ② [추가] 실제 로봇 그리퍼가 내려꽂힐 '객체 정중앙 파지점'에 빨간색 점 찍기
+            cv2.circle(result_img, tuple(p_center.astype(int)), 5, (0, 0, 255), -1)
+
+            # ③ 위로 뻗은 Y축 평행 기준선은 '하늘색 선' (유지)
+            cv2.line(result_img, tuple(p_base.astype(int)), (int(p_base[0]), int(p_base[1] - 35)), (0, 200, 200), 1)
+
+            # ④ [수정됨] 알고리즘이 선택한 각도를 '객체 정중앙에서 뻗어나가는 검은색 핀'으로 출력!
+            cv2.line(result_img, tuple(p_center.astype(int)), tuple(p_center_end.astype(int)), (0, 0, 0), 7)
 
         yaw_deg = round(yaw_deg, 1)
 
@@ -4524,7 +4618,7 @@ def fine_correct(final_obj_fine,
         cv2.drawContours(result_img, [best_cnt], -1, (0, 255, 0), 2)
         cv2.circle(result_img, (cx, cy), 4, (255, 0, 0), -1)
         cv2.drawContours(result_img, [np.intp(cv2.boxPoints(rect))], 0, (255, 165, 0), 2)
-        cv2.putText(result_img, f"YOLO_ID:{real_yolo_id} ({raw_name})", (cx - 40, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(result_img, f"YOLO_ID:{real_yolo_id} ({raw_name})", (cx - 40, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(result_img, f"Yaw: {yaw_deg}d", (cx - 40, cy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
     # --- 테이블 정렬 및 class_index 빌드 ---
@@ -4550,56 +4644,64 @@ def fine_correct(final_obj_fine,
 
     return fine_pose_table, fine_class_index
 
-def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
+def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visualize=True):
+
+    if mode in ["coarse", "fine"]:
+        pass
+    else:
+        raise ValueError(f"잘못된 mode 입력: {mode}. mode는 'coarse' 또는 'fine'만 가능합니다.")
+
+    # 이미지 입력 확인
 
     if color_rgb is None or depth is None or intrinsics is None or scale is None:
         raise RuntimeError("RealSense 캡처 실패: color/depth/intrinsics/scale 중 None이 있습니다.")
 
     color_img_bgr = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR)
 
-    # ### **YOLO V8 세그멘테이션 기준 영역 잡기**
-    # color_rgb, depth, intrinsics, scale
+    #======================================================================================
+    # YOLO V8 세그멘테이션 기준 영역 잡기 + 겹침 전처리
+    #======================================================================================
 
-    # 욜로 검출
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    MODEL_PATH = os.path.join(yolo_dir)
 
-    MODEL_PATH = os.path.join(
-        BASE_DIR,
-        "models",
-        "yolo_models",
-        "duplo_2_low_2",
-        "best.pt"
-    )
-
-    print("[DEBUG] MODEL_PATH:", MODEL_PATH)
-    print("[DEBUG] MODEL_EXISTS:", os.path.exists(MODEL_PATH))
+    if V_visualize:
+        print("[DEBUG] MODEL_PATH:", MODEL_PATH)
+        print("[DEBUG] MODEL_EXISTS:", os.path.exists(MODEL_PATH))
 
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH}")
 
     model = YOLO(MODEL_PATH)
-
-
-    # model = YOLO("yolo_models/duplo_2_low_2/weights/best.pt")
-    # model = YOLO("yolo_models/manip_segmentor_0528.pt")
     target_classes = [0, 1, 3, 4, 5, 6, 8, 9]
 
     results, mask_binary, vis_yolo = detect_objects_yolo(
         model= model, 
         color_img_bgr=color_img_bgr, 
         target_classes=target_classes, 
-        visualize=False
+        visualize=V_visualize
     )
 
-    # results (list): YOLO 모델의 원본 추론 결과 객체 리스트
-    # mask_binary (ndarray): 검출된 모든 객체의 마스크를 하나로 합친 이진 마스크 (0 or 1, 형태: H x W)
-    # vis_yolo (ndarray): 바운딩 박스와 라벨이 그려진 시각화용 이미지 (BGR)
+    if V_visualize:
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        fig.suptitle("[Debug Brick 1. YOLO DETECTION]")
+
+        axes[0].imshow(vis_yolo)
+        axes[0].set_title("YOLO result")
+        axes[0].axis("off")
+
+        axes[1].imshow(mask_binary, cmap="gray")
+        axes[1].set_title("Yolo Mask")
+        axes[1].axis("off")
+
+        p_title = 'original YOLO'
+        plt.suptitle(p_title)
+        plt.tight_layout()
+        plt.show()
 
 
-
-    # ### 바운딩 박스가 겹치는 부분을 억제하는 전처리 추가
-
-    # 겹치는 마스크 깔끔하게 정리 (해상도 640x480 기준, 70% 겹치면 삭제, 시각화 켬)
+    # 바운딩 박스가 겹치는 부분을 억제 = 겹치는 마스크 깔끔하게 정리
     final_objects, clean_mask = filter_overlapping_masks(
         results=results, 
         overlap_threshold=0.70, 
@@ -4607,31 +4709,11 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         visualize=V_visualize
     )
 
-    # final_detected_objects (list): 억제 후 살아남은 최종 객체들의 리스트. 
-    #                                 각 요소는 dict 형태 (class_id, class_name, confidence, mask)
-    # final_combined_mask (ndarray): 병합된 최종 전체 ROI 마스크 (0 or 1, uint8)
+    #======================================================================================
+    # 높이 차이 확인 + 바운딩 박스 비율 기반 ID 수정 + Convex Hull로 패딩
+    #======================================================================================
 
-
-
-    # print(f"\n✅ 최종 검출된 유효 객체/군집 수: {len(final_objects)}개")
-    # final_combined_mask = np.zeros((480, 640), dtype=np.uint8)
-    # for obj in final_objects:
-    #     print(f" - Name: {obj['class_name']}")
-    #     final_combined_mask = np.logical_or(final_combined_mask, obj["mask"]).astype(np.uint8)
-
-
-
-    # ### Ransac 바닥 검출 후 높이 + 비율 기반 ID 수정
-
-    # 1. 이전 단계에서 얻은 데이터: 
-    # color_rgb, depth, intrinsics, scale
-    # final_objects, clean_mask
-
-    # =================================================================
-    # [STEP 1 & 2 통합] DBSCAN+RANSAC 바닥 추정 및 40mm 돌출 맵 사영
-    # =================================================================
-    # 기존의 바닥 다림질과 돌출 맵 추출 과정이 하나의 함수로 처리됩니다.
-    # 반환된 closed_mask가 곧 40mm 이상 돌출된 객체의 2D 마스크(mask_40mm_2d)입니다.
+    # DBSCAN + RANSAC 바닥 검출
     mask_40mm_2d, refined_color, contours, plane_model = extract_3d_protruding_objects(
         depth_img=depth, 
         color_img_bgr=color_img_bgr, 
@@ -4640,42 +4722,24 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         yolo_combined_mask=clean_mask,
         depth_trunc=5.0,
         height_threshold=0.040,
-        visualize=False
+        visualize=V_visualize
     )
 
-    # print(f"\n✅ 최종 검출된 유효 객체/군집 수: {len(final_objects)}개")
-    # final_combined_mask = np.zeros((480, 640), dtype=np.uint8)
-    # for obj in final_objects:
-    #     print(f" - Name: {obj['class_name']}")
-    #     final_combined_mask = np.logical_or(final_combined_mask, obj["mask"]).astype(np.uint8)
-
-    # =================================================================
-    # [STEP 3] 최종 OBB 기반 ID 판독 및 교정
-    # =================================================================
-
-    final_objects_before = copy.deepcopy(final_objects)
-
+    # ID 판독 및 교정 4*2 or 2*2 변경
     final_objects, result_vis_img = correct_object_ids(
         detected_objects=final_objects, 
         mask_high_2d=mask_40mm_2d, 
         color_img_bgr=color_img_bgr, 
         ratio_threshold=1.5, 
         overlap_threshold=0.20, 
-        visualize=False
+        visualize=V_visualize
     )
 
-    # final_objects_after = copy.deepcopy(final_objects)
-
-    # =================================================================
-    # [STEP 3-1] ID 교정 후 마스크 Convex Hull로 내부 채우기
-    # =================================================================
-
-    objects_hull = copy.deepcopy(final_objects)
-
+    # Convex Hull로 내부 채우기
     mask_before = np.zeros(color_img_bgr.shape[:2], dtype=np.uint8)
     mask_hull_after = np.zeros(color_img_bgr.shape[:2], dtype=np.uint8)
 
-    for obj in objects_hull:
+    for obj in final_objects:
         original_mask = (obj["mask"] > 0).astype(np.uint8)
 
         # Convex Hull로 객체 영역 재생성
@@ -4691,9 +4755,59 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         mask_before = np.logical_or(mask_before, original_mask > 0).astype(np.uint8)
         mask_hull_after = np.logical_or(mask_hull_after, hull_mask > 0).astype(np.uint8)
 
+    # ============================================================
+    # Hull 적용 완료된 final_objects를 fine 처리용으로 복사
+    # ============================================================
+    final_obj_fine = copy.deepcopy(final_objects)
+
+    if V_visualize:
+        print(f"[INFO] final_obj_fine 복사 완료: {len(final_obj_fine)} objects")
+
+
+    # ============================================================
+    # Hull 적용 완료된 이미지 확인
+    # ============================================================
+    if V_visualize:
+        color_img_rgb = cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB)
+
+        # 0/1 mask -> 0/255로 변환
+        before_vis = ((mask_before > 0).astype(np.uint8) * 255)
+        after_vis = ((mask_hull_after > 0).astype(np.uint8) * 255)
+
+        # after 마스크를 원본 컬러에 씌운 결과
+        refined_after = cv2.bitwise_and(color_img_bgr, color_img_bgr, mask=after_vis)
+        # refined_after_rgb = cv2.cvtColor(refined_after, cv2.COLOR_BGR2RGB)
+
+        # after contour 그리기
+        overlay_rgb = color_img_rgb.copy()
+        contours, _ = cv2.findContours(after_vis, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay_rgb, contours, -1, (0, 255, 0), 2)
+
+        fig, axes = plt.subplots(1, 4, figsize=(18, 6))
+
+        axes[0].imshow(color_img_rgb)
+        axes[0].set_title("Original")
+        axes[0].axis("off")
+
+        axes[1].imshow(before_vis, cmap="gray")
+        axes[1].set_title("Mask Before Hull")
+        axes[1].axis("off")
+
+        axes[2].imshow(after_vis, cmap="gray")
+        axes[2].set_title("Mask After Hull")
+        axes[2].axis("off")
+
+        axes[3].imshow(overlay_rgb)
+        axes[3].set_title("Hull Overlay")
+        axes[3].axis("off")
+
+        p_title="Convex Hull Mask Result"
+        plt.suptitle(p_title)
+        plt.tight_layout()
+        plt.show()
 
     # =================================================================
-    # [STEP 4] Convex Hull + 마스크 기준으로 바닥/PCD 재생성
+    # Convex Hull + 마스크 기준으로 바닥/PCD 재생성 + 3D OBB 생성
     # =================================================================
 
     pcd_data, plane_data, floor_pcd = build_floor_scene_data_from_depth(
@@ -4705,16 +4819,12 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         voxel_size=0.003,
         plane_dist_thresh=0.015,
         floor_height_eps=0.005,
-        visualize=False
+        visualize=V_visualize
     )
 
-
-    # =================================================================
-    # [STEP 5] Convex Hull 객체 기준 3D OBB 생성
-    # =================================================================
-
+    # OBB 재생성
     objects_obb, vis_3d, overlay_3d, vis_2d_rgb, obb_results = generate_3d_obbs_from_hull_objects(
-        objects=objects_hull,
+        objects=final_objects,
         refined_mask_01=mask_hull_after,
         pcd_data=pcd_data,
         plane_data=plane_data,
@@ -4724,16 +4834,15 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
         min_height=0.024,
         max_height_limit=0.12,
         height_percentile=95,
-        visualize_2d=False
+        visualize_2d=V_visualize
     )
 
     # =================================================================
-    # [STEP] 3D OBB 기준 객체 좌표계 + Camera 기준 RPY 계산
+    # 3D OBB 기준 객체 좌표계 + Camera 기준 RPY 계산
     # =================================================================
 
     pose_results = []
     axes_geometries = []
-
     plane_normal = plane_data["normal"]
 
     for idx, obj in enumerate(objects_obb):
@@ -4821,20 +4930,40 @@ def search_wide(color_rgb, depth, intrinsics, scale, V_visualize=True):
             window_name="RGB-D PointCloud + Object XYZ Axes"
         )
 
-
     pose_table, class_index = build_class_sorted_pose_index(
         objects_obb=objects_obb,
         use_pose_cam=True,
         remove_c_prefix=True,
         remove_side2=False,
-        verbose=True
+        verbose=False
     )
 
-    # if mode:
-    #     fine 함수 추가
+    if mode == 'fine':
 
-    return pose_table, class_index
+        if V_visualize:
+            print("이제 파인으로 진입합니다.")
 
+        # final_obj_fine 기준으로 dilation 적용
+        final_obj_fine, mask_dilate_before, mask_dilate_after, dilate_vis_img = dilate_final_objects(
+            final_obj_fine=final_obj_fine,
+            image_shape=color_img_bgr.shape[:2],
+            kernel_size=7,
+            iterations=1,
+            kernel_type="ellipse",
+            visualize=V_visualize,
+            color_img_bgr=color_img_bgr
+        )
+
+        pose_table, class_index = fine_correct(
+                    final_obj_fine=final_obj_fine,
+                    color_rgb=color_rgb,
+                    depth=depth,
+                    scale=scale,
+                    intrinsics=intrinsics,
+                    V_visualize=V_visualize
+                )
+
+    return pose_table, class_index 
 
 def search_assembly(
     color_rgb,
