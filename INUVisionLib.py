@@ -4574,6 +4574,36 @@ def decide_bottom_side_by_color_projection(
 
 ################################### 실행 함수
 
+def get_target_grasp_pose(class_index, target_class_name):
+    """
+    class_index와 원하는 클래스 이름을 넣으면 광학축 최근접 객체의 (X, Y, Z, Yaw)를 반환합니다.
+    """
+    if target_class_name not in class_index:
+        print(f"🚨 시야에 [{target_class_name}] 블록이 없습니다.")
+        print(f"👉 현재 감지된 클래스 목록: {list(class_index.keys())}")
+        return None, None, None, None
+
+    if len(class_index[target_class_name]) == 0:
+        print(f"🚨 [{target_class_name}] 클래스는 있지만 pose가 비어 있습니다.")
+        return None, None, None, None
+
+    # class_index[target_class_name]가 이미 광학축 가까운 순서로 정렬되어 있어야 함
+    target_brick = class_index[target_class_name][0]
+
+    pick_x = target_brick["x_mm"]
+    pick_y = target_brick["y_mm"]
+    pick_z = target_brick["z_mm"]
+    pick_yaw = target_brick["yaw_deg"]
+
+    print(f"🎯 타겟 [{target_class_name}] 포착 완료!")
+    print(
+        f"   ➔ 로봇 이동 좌표: "
+        f"X={pick_x:.1f}, Y={pick_y:.1f}, Z={pick_z:.1f} / "
+        f"회전: Yaw={pick_yaw:.2f}도"
+    )
+
+    return pick_x, pick_y, pick_z, pick_yaw
+
 def fine_correct(final_obj_fine,
     color_rgb,
     depth,
@@ -4746,52 +4776,100 @@ def fine_correct(final_obj_fine,
         width, height = rect[1][0], rect[1][1]
         aspect_ratio = max(width, height) / min(width, height) if min(width, height) > 0 else 1.0
 
-        # ----------------------------------------------------------------
-        # [NEW] 제안하신 PCA 단축 기반 초정밀 각도 추출 로직 (길쭉한 블록)
-        # ----------------------------------------------------------------
         if aspect_ratio >= 1.5:
-            # 1. PCA 수행: 윤곽선 점들의 분포 분석
-            pts = best_cnt.reshape(-1, 2).astype(np.float64)
-            _, eigenvectors = cv2.PCACompute(pts, mean=None)
+            # ============================================================
+            # [수정] PCA 대신 minAreaRect 박스의 단축 방향으로 yaw 계산
+            # 기준:
+            # - 영상 좌표계에서 위쪽 방향 = -Y
+            # - 단축 벡터가 위쪽(-Y)을 향하도록 방향 선택
+            # - atan2(x, -y)로 수직 위쪽 기준 yaw 계산
+            # ============================================================
 
-            # eigenvectors[0]는 장축(가장 긴 쪽) 벡터, eigenvectors[1]는 단축(짧은 쪽) 벡터
-            major_v = eigenvectors[0]
-            minor_v = eigenvectors[1]  # <--- [핵심] 단축 벡터 선택
+            box_pts = cv2.boxPoints(rect).astype(np.float64)  # shape: (4, 2)
 
-            # 2. 중심에서 나가는 단축의 두 방향 생성
-            ray_1 = minor_v        # 방향 1
-            ray_2 = -minor_v       # 방향 2 (반대)
+            # ------------------------------------------------------------
+            # 1. minAreaRect 박스의 인접 edge 2개만 보면 됨
+            #    box_pts는 사각형 꼭짓점이 순서대로 들어있으므로
+            #    edge0, edge1은 서로 수직인 두 변 방향
+            # ------------------------------------------------------------
+            edge0 = box_pts[1] - box_pts[0]
+            edge1 = box_pts[2] - box_pts[1]
 
-            # 3. 두 방향 중 Y 성분이 더 작은(즉, 영상 좌표계 위쪽을 향하는) 선분 선택
-            # (ray_1[1] 과 ray_2[1]의 부호를 비교)
-            if ray_1[1] < ray_2[1]:
-                chosen_v = ray_1
+            len0 = np.linalg.norm(edge0)
+            len1 = np.linalg.norm(edge1)
+
+            # ------------------------------------------------------------
+            # 2. 더 짧은 edge를 단축 방향 벡터로 선택
+            # ------------------------------------------------------------
+            if len0 <= len1:
+                minor_v = edge0
             else:
-                chosen_v = ray_2
+                minor_v = edge1
 
-            # 4. 선택된 위쪽 단축 선분이 기준선(수직 위쪽, -Y)과 이루는 각도 계산
-            # math.atan2(x, -y) 공식을 쓰면 수직 위쪽을 0도로 삼아 [우측 갸우뚱=+, 좌측 갸우뚱=-] 각도가 나옴
+            # ------------------------------------------------------------
+            # 3. 방향 통일
+            #    영상 좌표계는 y가 아래로 증가하므로,
+            #    위쪽을 향하는 벡터는 y 성분이 음수여야 함.
+            # ------------------------------------------------------------
+            if minor_v[1] > 0:
+                minor_v = -minor_v
+
+            # y가 거의 0인 수평 단축일 경우 방향이 애매하므로
+            # x 양수 방향을 +90도로 통일하고 싶으면 이 처리 추가
+            if abs(minor_v[1]) < 1e-6 and minor_v[0] < 0:
+                minor_v = -minor_v
+
+            # ------------------------------------------------------------
+            # 4. 정규화
+            # ------------------------------------------------------------
+            norm = np.linalg.norm(minor_v)
+            if norm < 1e-6:
+                continue
+
+            chosen_v = minor_v / norm
+
+            # ------------------------------------------------------------
+            # 5. 영상 좌표계 -Y 방향 기준 yaw 계산
+            #    chosen_v = [0, -1] 이면 yaw = 0도
+            #    chosen_v = [1,  0] 이면 yaw = +90도
+            #    chosen_v = [-1, 0] 이면 yaw = -90도
+            # ------------------------------------------------------------
             yaw_deg = math.degrees(math.atan2(chosen_v[0], -chosen_v[1]))
 
-
-            # --- [시각화 검증용 드로잉] ---
+            # ------------------------------------------------------------
+            # 시각화
+            # ------------------------------------------------------------
             if result_img is not None:
-                # ① 객체 무게중심(cx, cy)은 '빨간색 점'
-                p_base = np.array([cx, cy])
-                cv2.circle(result_img, tuple(p_base), 4, (0, 0, 255), -1)
+                p_center = np.array(rect[0], dtype=np.float64)
 
-                # ② 위로 뻗은 Y축 평행 기준선(-Y 방향)은 '노란색 선'
-                cv2.line(result_img, tuple(p_base), (int(cx), int(cy - 40)), (0, 255, 255), 1)
+                # 객체 중심점
+                cv2.circle(result_img, tuple(p_center.astype(int)), 5, (0, 0, 255), -1)
 
-                # ③ 알고리즘이 선택한 위쪽 단축 선분은 '하늘색 두꺼운 선'
-                # (끝점을 잘 보이게 하기 위해 벡터 크기를 30픽셀로 스케일업)
-                p_end = p_base + (chosen_v * 30)
-                cv2.line(result_img, tuple(p_base), tuple(p_end.astype(int)), (0, 0, 0), 7)
+                # 기준선: 영상 좌표계 -Y 방향
+                p_ref_end = p_center + np.array([0, -45], dtype=np.float64)
+                cv2.line(
+                    result_img,
+                    tuple(p_center.astype(int)),
+                    tuple(p_ref_end.astype(int)),
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA
+                )
 
-                # ④ (비교용) 장축 방향을 '연한 마젠타색 선'으로 표시 (선택되지 않음)
-                p_major_end = p_base + (major_v * 50)
-                cv2.line(result_img, tuple(p_base), tuple(p_major_end.astype(int)), (255, 0, 255), 1, cv2.LINE_AA)
+                # 선택된 단축 방향선
+                p_minor_end = p_center + chosen_v * 45
+                cv2.line(
+                    result_img,
+                    tuple(p_center.astype(int)),
+                    tuple(p_minor_end.astype(int)),
+                    (0, 0, 0),
+                    7,
+                    cv2.LINE_AA
+                )
 
+                # minAreaRect 박스도 같이 확인용으로 그림
+                box_int = box_pts.astype(np.int32)
+                cv2.drawContours(result_img, [box_int], -1, (255, 0, 255), 1)
         else:
             box_pts = cv2.boxPoints(rect)  # 사각형의 4개 꼭짓점 좌표 [shape: (4, 2)]
 
@@ -5241,190 +5319,397 @@ def search_assembly(
     depth,
     intrinsics,
     scale,
+    yolo_model=None,
+    yolo_dir=None,
     V_visualize=True,
-    class_name="assembly",
-    ransac_distance_threshold=0.006,
-    object_min_plane_dist=0.010,
-    min_area_px=80,
+
+    # YOLO 설정
+    target_classes=None,       # 숫자 class id 리스트. 예: [0, 1, 2], None이면 전체
+    target_class_names=None,   # 문자열 class name 리스트. 예: ["Magnet"], None이면 전체
+    conf_thres=0.5,
+    iou_thres=0.3,
+    imgsz=640,
+    device=0,
+
+    # mask 후처리
+    yolo_mask_thresh=0.5,
     morph_open_ksize=3,
     morph_close_ksize=5,
-    min_contour_area=80
+    min_contour_area=80,
+
+    # depth 검사
+    min_valid_depth_points=30
 ):
     """
-    조립체 / 덩어리 검출용 Search 함수.
-
-    목적:
-    - YOLO 없이 depth 기준으로 바닥 plane 제거
-    - 바닥보다 object_min_plane_dist 이상 튀어나온 영역을 object_mask로 생성
-    - object_mask contour별 PCA 수행
-    - 각 덩어리의 중심 XYZ + yaw 반환
-    - 반환 구조는 search_wide()처럼 pose_table, class_index 형태로 맞춤
+    YOLOv8-seg 클래스 이름 기반 search_assembly.
 
     반환:
-    - pose_table: list[dict]
-    - class_index: dict[str, list[dict]]
+        pose_table:
+            전체 객체 pose list
+
+        class_index:
+            {
+                "YOLO_CLASS_NAME": [pose0, pose1, ...],
+                ...
+            }
+
+    사용 예:
+        yolo_dir = "yolo_models/Component_Model_ver1.0/Model_s_ver2.0/best.pt"
+        yolo_model = YOLO(yolo_dir)
+
+        pose_table, class_index = search_assembly(
+            color_rgb=color_rgb,
+            depth=depth,
+            intrinsics=intrinsics,
+            scale=scale,
+            yolo_model=yolo_model,
+            V_visualize=True
+        )
+
+        target_class = "Magnet"
+        X, Y, Z, YAW = get_target_grasp_pose(class_index, target_class)
     """
 
     if color_rgb is None or depth is None or intrinsics is None or scale is None:
         raise RuntimeError("RealSense 캡처 실패: color/depth/intrinsics/scale 중 None이 있습니다.")
 
-    depth_img = depth.copy()
+    if yolo_model is None and yolo_dir is None:
+        raise ValueError("yolo_model 또는 yolo_dir 중 하나는 반드시 입력해야 합니다.")
+
+    # ------------------------------------------------------------
+    # 0. 이미지 정리
+    # ------------------------------------------------------------
     color_img_rgb = color_rgb.copy()
+    if color_img_rgb.dtype != np.uint8:
+        color_img_rgb = np.clip(color_img_rgb, 0, 255).astype(np.uint8)
+
+    depth_img = depth.copy()
     depth_scale = scale
 
+    H, W = depth_img.shape[:2]
+
     # ------------------------------------------------------------
-    # 1. RANSAC 바닥 제거 + object mask 생성
+    # 1. YOLO 모델 준비
     # ------------------------------------------------------------
-    result = extract_object_components_with_pca(
+    if yolo_model is None:
+        from ultralytics import YOLO
+        yolo_model = YOLO(yolo_dir)
+
+    # ultralytics 입력은 BGR도 가능하지만, 기존 OpenCV 흐름에 맞춰 BGR 사용
+    color_img_bgr = cv2.cvtColor(color_img_rgb, cv2.COLOR_RGB2BGR)
+
+    # ------------------------------------------------------------
+    # 2. YOLOv8 segmentation 추론
+    # ------------------------------------------------------------
+    yolo_kwargs = dict(
+        conf=conf_thres,
+        iou=iou_thres,
+        imgsz=imgsz,
+        device=device,
+        verbose=False
+    )
+
+    if target_classes is not None:
+        yolo_kwargs["classes"] = target_classes
+
+    results = yolo_model(color_img_bgr, **yolo_kwargs)
+
+    if len(results) == 0 or results[0].masks is None:
+        print("[WARN] YOLO segmentation mask가 없습니다.")
+        return [], {}
+
+    result0 = results[0]
+
+    masks = result0.masks.data.cpu().numpy()
+    boxes = result0.boxes
+    class_ids = boxes.cls.cpu().numpy().astype(int)
+    confidences = boxes.conf.cpu().numpy()
+
+    # YOLO class id -> class name
+    yolo_names = result0.names
+
+    # ------------------------------------------------------------
+    # 3. depth -> xyz_map 생성
+    # ------------------------------------------------------------
+    xyz_map, valid_mask = depth_to_xyz_map(
         depth_img=depth_img,
         depth_scale=depth_scale,
-        intrinsics=intrinsics,
-        color_img_rgb=color_img_rgb,
-
-        # assembly 모드는 YOLO 없이 depth 덩어리만 사용
-        and_mask=None,
-
-        median_ksize=3,
-        ransac_distance_threshold=ransac_distance_threshold,
-        object_min_plane_dist=object_min_plane_dist,
-        min_area_px=min_area_px,
-        morph_open_ksize=morph_open_ksize,
-        morph_close_ksize=morph_close_ksize,
-        show=False,
-        visualize=False
+        intrinsics=intrinsics
     )
 
-    object_mask = result["object_mask"]
-    xyz_map = result["xyz_map"]
-    valid_mask = result["valid_mask"]
-    floor_mask = result["floor_mask"]
-    plane_dist_map = result["plane_dist_map"]
-
     # ------------------------------------------------------------
-    # 2. Contour 기준 PCA 추출
-    # ------------------------------------------------------------
-    contour_objects = extract_contour_pca_from_mask(
-        object_mask=object_mask,
-        xyz_map=xyz_map,
-        valid_mask=valid_mask,
-        min_contour_area=min_contour_area
-    )
-
-    print("\n[INFO] assembly contour object count:", len(contour_objects))
-
-    # ------------------------------------------------------------
-    # 3. 시각화
-    # ------------------------------------------------------------
-    if V_visualize:
-        vis_contour_pca = visualize_contour_pca_axes(
-            color_img_rgb=color_img_rgb,
-            object_mask=object_mask,
-            contour_objects=contour_objects,
-            draw_mask=True,
-            draw_contour=True,
-            draw_min_rect=True,
-            axis_len_mode="pca_length",
-            fixed_axis_len=80
-        )
-
-        plt.figure(figsize=(8, 6))
-        plt.imshow(vis_contour_pca)
-        plt.title("Assembly Depth Blob PCA")
-        plt.axis("off")
-        plt.show()
-
-        plt.figure(figsize=(7, 5))
-        plt.imshow(object_mask, cmap="gray")
-        plt.title("RANSAC Assembly Object Mask")
-        plt.axis("off")
-        plt.show()
-
-        plt.figure(figsize=(7, 5))
-        plt.imshow(plane_dist_map * 1000.0, cmap="jet")
-        plt.colorbar(label="Distance from RANSAC plane [mm]")
-        plt.title("Plane Distance Map [mm]")
-        plt.axis("off")
-        plt.show()
-
-    # ------------------------------------------------------------
-    # 4. pose_table / class_index 생성
+    # 4. YOLO instance mask별 contour/PCA/pose 생성
     # ------------------------------------------------------------
     pose_table = []
+    combined_mask = np.zeros((H, W), dtype=np.uint8)
+    all_contour_objects_for_vis = []
 
-    for global_idx, obj in enumerate(contour_objects):
-        if "center_xyz" not in obj:
-            print(f"[SKIP] assembly idx {global_idx}: center_xyz 없음")
-            continue
+    for det_idx, mask in enumerate(masks):
+        class_id = int(class_ids[det_idx])
+        yolo_class_name = str(yolo_names[class_id])
+        confidence = float(confidences[det_idx])
 
-        center_xyz_m = np.asarray(obj["center_xyz"], dtype=np.float64)
-        center_xyz_mm = center_xyz_m * 1000.0
+        # 문자열 class name으로도 필터링 가능
+        if target_class_names is not None:
+            if yolo_class_name not in target_class_names:
+                continue
 
-        # 2D contour PCA 기준 yaw
-        yaw_deg = (float(obj.get("angle_deg", 0.0)) + 180.0) % 360.0 - 180.0
+        # mask resize
+        mask_resized = cv2.resize(
+            mask,
+            (W, H),
+            interpolation=cv2.INTER_NEAREST
+        )
 
-        # assembly 모드는 바닥 기준 덩어리이므로 roll/pitch는 일단 0으로 둠
-        # 나중에 plane normal 기반으로 확장 가능
-        roll_deg = 0.0
-        pitch_deg = 0.0
+        instance_mask = (mask_resized > yolo_mask_thresh).astype(np.uint8) * 255
 
-        pose = {
-            # search_wide 결과와 맞추기 위한 공통 필드
-            "class_name": class_name,
-            "local_id": global_idx,
-            "global_idx": global_idx,
+        # morphology
+        if morph_open_ksize is not None and morph_open_ksize > 1:
+            k_open = np.ones((morph_open_ksize, morph_open_ksize), np.uint8)
+            instance_mask = cv2.morphologyEx(instance_mask, cv2.MORPH_OPEN, k_open)
 
-            "x_mm": float(center_xyz_mm[0]),
-            "y_mm": float(center_xyz_mm[1]),
-            "z_mm": float(center_xyz_mm[2]),
+        if morph_close_ksize is not None and morph_close_ksize > 1:
+            k_close = np.ones((morph_close_ksize, morph_close_ksize), np.uint8)
+            instance_mask = cv2.morphologyEx(instance_mask, cv2.MORPH_CLOSE, k_close)
 
-            "roll_deg": float(roll_deg),
-            "pitch_deg": float(pitch_deg),
-            "yaw_deg": float(yaw_deg),
+        combined_mask = cv2.bitwise_or(combined_mask, instance_mask)
 
-            # 디버그 / 확장용 필드
-            "center_mm": center_xyz_mm,
-            "center_xyz": center_xyz_m,
-            "center_uv": obj.get("center_uv", None),
+        # 이 YOLO instance mask 안에서 contour PCA 수행
+        contour_objects = extract_contour_pca_from_mask(
+            object_mask=instance_mask,
+            xyz_map=xyz_map,
+            valid_mask=valid_mask,
+            min_contour_area=min_contour_area
+        )
 
-            "major_axis_uv": obj.get("major_axis_uv", None),
-            "minor_axis_uv": obj.get("minor_axis_uv", None),
-            "angle_deg": obj.get("angle_deg", None),
+        for contour_obj in contour_objects:
+            contour_mask = contour_obj.get("contour_mask", None)
 
-            "major_axis_xyz": obj.get("major_axis_xyz", None),
-            "middle_axis_xyz": obj.get("middle_axis_xyz", None),
-            "minor_axis_xyz": obj.get("minor_axis_xyz", None),
+            if contour_mask is None:
+                continue
 
-            "major_length_mm": float(obj.get("major_length_m", 0.0) * 1000.0)
-                if "major_length_m" in obj else None,
-            "middle_length_mm": float(obj.get("middle_length_m", 0.0) * 1000.0)
-                if "middle_length_m" in obj else None,
-            "minor_length_mm": float(obj.get("minor_length_m", 0.0) * 1000.0)
-                if "minor_length_m" in obj else None,
+            valid_count = np.count_nonzero((contour_mask > 0) & valid_mask)
 
-            # 원본 contour object도 필요하면 추적 가능
-            "raw_contour_object": obj
-        }
+            if valid_count < min_valid_depth_points:
+                print(
+                    f"[SKIP] {yolo_class_name} det_idx={det_idx}: "
+                    f"valid depth points 부족 ({valid_count})"
+                )
+                continue
 
-        pose_table.append(pose)
+            if "center_xyz" not in contour_obj:
+                print(
+                    f"[SKIP] {yolo_class_name} det_idx={det_idx}: "
+                    f"center_xyz 없음"
+                )
+                continue
 
-    # 가까운 순서로 정렬하고 local_id 다시 부여
-    # 기본 기준: 카메라 Z가 작은 것, 즉 카메라에 가까운 덩어리 우선
+            contour_obj["yolo_class_id"] = class_id
+            contour_obj["yolo_class_name"] = yolo_class_name
+            contour_obj["yolo_confidence"] = confidence
+            contour_obj["yolo_det_idx"] = det_idx
+            contour_obj["valid_depth_points"] = int(valid_count)
+
+            all_contour_objects_for_vis.append(contour_obj)
+
+            center_xyz_m = np.asarray(contour_obj["center_xyz"], dtype=np.float64)
+            center_xyz_mm = center_xyz_m * 1000.0
+
+            yaw_deg = (float(contour_obj.get("angle_deg", 0.0)) + 180.0) % 360.0 - 180.0
+
+            pose = {
+                # 핵심: 여기 class_name이 YOLO 클래스 이름이 됨
+                "class_name": yolo_class_name,
+                "class_id": class_id,
+                "confidence": confidence,
+
+                "local_id": -1,      # 나중에 class별로 다시 부여
+                "global_idx": -1,    # 나중에 전체 순서로 다시 부여
+                "yolo_det_idx": det_idx,
+
+                "x_mm": float(center_xyz_mm[0]),
+                "y_mm": float(center_xyz_mm[1]),
+                "z_mm": float(center_xyz_mm[2]),
+
+                "roll_deg": 0.0,
+                "pitch_deg": 0.0,
+                "yaw_deg": float(yaw_deg),
+
+                "center_mm": center_xyz_mm,
+                "center_xyz": center_xyz_m,
+                "center_uv": contour_obj.get("center_uv", None),
+
+                "major_axis_uv": contour_obj.get("major_axis_uv", None),
+                "minor_axis_uv": contour_obj.get("minor_axis_uv", None),
+                "angle_deg": contour_obj.get("angle_deg", None),
+
+                "major_axis_xyz": contour_obj.get("major_axis_xyz", None),
+                "middle_axis_xyz": contour_obj.get("middle_axis_xyz", None),
+                "minor_axis_xyz": contour_obj.get("minor_axis_xyz", None),
+
+                "major_length_mm": float(contour_obj.get("major_length_m", 0.0) * 1000.0)
+                    if "major_length_m" in contour_obj else None,
+                "middle_length_mm": float(contour_obj.get("middle_length_m", 0.0) * 1000.0)
+                    if "middle_length_m" in contour_obj else None,
+                "minor_length_mm": float(contour_obj.get("minor_length_m", 0.0) * 1000.0)
+                    if "minor_length_m" in contour_obj else None,
+
+                "area_px": float(contour_obj.get("area_px", 0.0)),
+                "valid_depth_points": int(valid_count),
+
+                "raw_contour_object": contour_obj
+            }
+
+            pose_table.append(pose)
+
+    # ------------------------------------------------------------
+    # 5. 가까운 순서로 전체 정렬
+    # ------------------------------------------------------------
     pose_table = sorted(pose_table, key=lambda p: p["z_mm"])
 
-    for local_id, pose in enumerate(pose_table):
-        pose["local_id"] = local_id
+    for global_idx, pose in enumerate(pose_table):
+        pose["global_idx"] = global_idx
 
-    class_index = {
-        class_name: pose_table
-    }
+    # ------------------------------------------------------------
+    # 6. YOLO class_name 기준 class_index 생성
+    # ------------------------------------------------------------
+    class_index = {}
 
-    print("\n[Assembly Pose Table]")
+    for pose in pose_table:
+        cname = pose["class_name"]
+
+        if cname not in class_index:
+            class_index[cname] = []
+
+        class_index[cname].append(pose)
+
+    # class별 local_id 다시 부여
+    for cname, poses in class_index.items():
+        poses_sorted = sorted(poses, key=lambda p: p["z_mm"])
+        class_index[cname] = poses_sorted
+
+        for local_id, pose in enumerate(poses_sorted):
+            pose["local_id"] = local_id
+
+    # ------------------------------------------------------------
+    # 7. 시각화
+    # ------------------------------------------------------------
+    if V_visualize:
+        vis_yolo_bgr = result0.plot()
+        vis_yolo_rgb = cv2.cvtColor(vis_yolo_bgr, cv2.COLOR_BGR2RGB)
+
+        plt.figure(figsize=(8, 6))
+        plt.imshow(vis_yolo_rgb)
+        plt.title("YOLOv8 Segmentation Result")
+        plt.axis("off")
+        plt.show()
+
+        plt.figure(figsize=(7, 5))
+        plt.imshow(combined_mask, cmap="gray")
+        plt.title("YOLO Combined Mask")
+        plt.axis("off")
+        plt.show()
+
+        if len(all_contour_objects_for_vis) > 0:
+            vis_contour_pca = visualize_contour_pca_axes(
+                color_img_rgb=color_img_rgb,
+                object_mask=combined_mask,
+                contour_objects=all_contour_objects_for_vis,
+                draw_mask=True,
+                draw_contour=True,
+                draw_min_rect=True,
+                axis_len_mode="pca_length",
+                fixed_axis_len=80
+            )
+
+            plt.figure(figsize=(8, 6))
+            plt.imshow(vis_contour_pca)
+            plt.title("YOLO Class Mask Contour PCA")
+            plt.axis("off")
+            plt.show()
+
+    # ------------------------------------------------------------
+    # 8. 출력 확인
+    # ------------------------------------------------------------
+    print("\n[YOLO Class Pose Table]")
     for pose in pose_table:
         print(
-            f"local_id {pose['local_id']:02d} | {pose['class_name']:12s} | "
+            f"global {pose['global_idx']:02d} | "
+            f"local {pose['local_id']:02d} | "
+            f"{pose['class_name']:16s} | "
+            f"conf={pose['confidence']:.2f} | "
             f"XYZ mm=({pose['x_mm']:7.1f}, {pose['y_mm']:7.1f}, {pose['z_mm']:7.1f}) | "
-            f"RPY deg=({pose['roll_deg']:7.2f}, {pose['pitch_deg']:7.2f}, {pose['yaw_deg']:7.2f})"
+            f"YAW={pose['yaw_deg']:7.2f} | "
+            f"area={pose['area_px']:.0f}"
         )
+
+    print("\n[YOLO Class Index]")
+    for cname, poses in class_index.items():
+        print(f"{cname}: {len(poses)}개")
+
+    # ------------------------------------------------------------
+    # class_index 생성
+    # YOLO class_name 기준으로 묶고,
+    # 각 클래스 내부는 광학축 중심에 가까운 순서로 정렬
+    # ------------------------------------------------------------
+
+    # 전체 pose에 global_idx 부여
+    for global_idx, pose in enumerate(pose_table):
+        pose["global_idx"] = global_idx
+
+        # 광학축과의 거리 [mm]
+        # 카메라 좌표계에서 optical axis는 보통 Z축이므로,
+        # X-Y 평면에서 원점에 가까운 정도를 사용
+        pose["optical_axis_dist_mm"] = float(
+            np.sqrt(pose["x_mm"] ** 2 + pose["y_mm"] ** 2)
+        )
+
+    class_index = {}
+
+    for pose in pose_table:
+        cname = pose["class_name"]   # 여기에는 YOLO class name이 들어가야 함
+
+        if cname not in class_index:
+            class_index[cname] = []
+
+        class_index[cname].append(pose)
+
+    # 클래스별로 광학축 가까운 순서 정렬
+    for cname, poses in class_index.items():
+        poses_sorted = sorted(
+            poses,
+            key=lambda p: p["optical_axis_dist_mm"]
+        )
+
+        class_index[cname] = poses_sorted
+
+        # class 내부 local_id 재부여
+        for local_id, pose in enumerate(poses_sorted):
+            pose["local_id"] = local_id
+
+    # pose_table도 보기 좋게 광학축 가까운 순서로 정렬하고 싶으면
+    pose_table = sorted(
+        pose_table,
+        key=lambda p: p["optical_axis_dist_mm"]
+    )
+
+    print("\n[YOLO Class Pose Table]")
+    for pose in pose_table:
+        print(
+            f"global {pose['global_idx']:02d} | "
+            f"local {pose['local_id']:02d} | "
+            f"{pose['class_name']:16s} | "
+            f"conf={pose['confidence']:.2f} | "
+            f"XYZ mm=({pose['x_mm']:7.1f}, {pose['y_mm']:7.1f}, {pose['z_mm']:7.1f}) | "
+            f"YAW={pose['yaw_deg']:7.2f} | "
+            f"axis_dist={pose['optical_axis_dist_mm']:.1f}"
+        )
+
+    print("\n[YOLO Class Index]")
+    for cname, poses in class_index.items():
+        print(f"{cname}: {len(poses)}개")
+
+    return pose_table, class_index
 
     return pose_table, class_index
 
