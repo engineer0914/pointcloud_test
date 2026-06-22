@@ -5515,7 +5515,7 @@ def search_assembly(
             center_xyz_m = np.asarray(contour_obj["center_xyz"], dtype=np.float64)
             center_xyz_mm = center_xyz_m * 1000.0
 
-            yaw_deg = (float(contour_obj.get("angle_deg", 0.0)) + 180.0) % 360.0 - 180.0
+            yaw_deg = (float(contour_obj.get("angle_deg", 0.0)) + 180.0) % 180.0 - 90.0
 
             pose = {
                 # 핵심: 여기 class_name이 YOLO 클래스 이름이 됨
@@ -5708,8 +5708,6 @@ def search_assembly(
     print("\n[YOLO Class Index]")
     for cname, poses in class_index.items():
         print(f"{cname}: {len(poses)}개")
-
-    return pose_table, class_index
 
     return pose_table, class_index
 

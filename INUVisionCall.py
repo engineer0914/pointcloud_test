@@ -162,7 +162,7 @@ class VisionManager:
         camera_mode="mid_50",
         brick_search_mode="fine",
         V_visualize_capture=False,
-        V_visualize_search=True
+        V_visualize_search=False
     ):
         """
         target_id를 받아서:
@@ -360,8 +360,8 @@ if __name__ == "__main__":
         # 테스트할 ID
         # 1~8: 브릭
         # 13, 34, 81 ...: 컴포넌트
-        TEST_TARGET_ID = 7
-        # TEST_TARGET_ID = 34
+        # TEST_TARGET_ID = 7
+        TEST_TARGET_ID = 13
 
         result = vision.run_pipeline_by_id(
             target_id=TEST_TARGET_ID,
