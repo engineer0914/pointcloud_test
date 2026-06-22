@@ -66,8 +66,6 @@ CAMERA_PROFILES = {
 
 # 카메라 설정 함수들
 
-
-
 def load_rgb_calibration_from_folder(
     calib_folder,
     yaml_name=None,
@@ -594,8 +592,6 @@ def get_aligned_frames_with_units(
     }
 
     return depth_image, color_image, depth_scale_used, debug_info
-
-
 
 
 # 조립체 분석용 함수들
@@ -1540,7 +1536,6 @@ def create_floor_anchored_3d_box(box_2d, intrinsics, plane_normal, d, max_h, col
     line_set.colors = o3d.utility.Vector3dVector(colors)
     return line_set
 
-
 # 컨트롤 함수
 
 def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=False):
@@ -1596,7 +1591,7 @@ def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=Fal
         
         fig, axes = plt.subplots(1, 3, figsize=(14, 6))
 
-        axes[0].imshow(vis_yolo)
+        axes[0].imshow(cv2.cvtColor(vis_yolo, cv2.COLOR_BGR2RGB))
         axes[0].set_title(f"YOLO Segmentations (Targets: {target_classes})")
         axes[0].axis("off")
         
@@ -1728,8 +1723,6 @@ def filter_overlapping_masks(results, overlap_threshold=0.70, img_shape=(640, 48
         plt.show()
 
     return final_detected_objects, final_combined_mask
-
-
 
 def estimate_floor_plane(depth_img, yolo_combined_mask, intrinsics, depth_scale, depth_trunc=1.5, visualize=False):
     """
@@ -1930,10 +1923,6 @@ def correct_object_ids(detected_objects, mask_high_2d, color_img_bgr, ratio_thre
         plt.show()
 
     return detected_objects, vis_image
-
-
-
-
 
 def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_scale, yolo_combined_mask=None, depth_trunc=1.5, height_threshold=0.005, visualize=False):
     """
@@ -2145,8 +2134,6 @@ def process_scene_and_get_height_masks(depth_img, intrinsics, depth_scale, color
 
     return mask_5mm_2d, mask_40mm_2d, pcd_data, plane_data, floor_pcd
 
-
-
 def fuse_yolo_and_generate_3d_obbs(detected_objects, refined_mask_01, mask_40mm_2d, pcd_data, plane_data, intrinsics, color_img_rgb, floor_pcd=None):
     """
     [STEP 4~5] YOLO와 3D 마스크 융합, ID 교정, 최저 높이 객체 판별 및 바닥 밀착형 3D OBB 생성
@@ -2283,7 +2270,6 @@ def visualize_final_rgbd_pointcloud(color_img_rgb, depth_img, intrinsics, depth_
     final_overlay_elements = [rgb_pcd] + overlay_geometries_3d
     o3d.visualization.draw_geometries(final_overlay_elements, window_name="2. Real RGB-D Point Cloud with OBBs & Axes")
 
-
 def fill_object_mask_holes(mask):
     """
     객체 segmentation mask 내부를 외곽 contour 기준으로 채움.
@@ -2310,9 +2296,6 @@ def fill_object_mask_holes(mask):
         )
 
     return filled
-
-
-
 
 def visualize_id_correction_and_final_segments(
     color_img_bgr,
@@ -2635,7 +2618,6 @@ def visualize_id_correction_and_final_segments(
         "final_overlay": final_overlay,
     }
 
-
 def add_side2_suffix_for_high_corrected_objects(
     objects_before,
     objects_after,
@@ -2704,7 +2686,6 @@ def add_side2_suffix_for_high_corrected_objects(
         after_obj["height_overlap_ratio"] = overlap_ratio
 
     return objects_after
-
 
 def fill_object_mask_by_convex_hull(mask, min_area=20):
     """
@@ -3008,7 +2989,6 @@ def project_pixel_to_plane(u, v, intrinsics, plane_normal, plane_d):
         return None
 
     return ray * t
-
 
 def create_floor_anchored_box_lineset(
     box_2d,
@@ -3315,7 +3295,6 @@ def generate_3d_obbs_from_hull_objects(
 
     return objects_out, vis_elements_3d, overlay_geometries_3d, vis_2d_rgb, obb_results
 
-
 def rotation_matrix_to_rpy_xyz_deg(R_mat):
     """
     Camera frame 기준 roll, pitch, yaw 계산.
@@ -3342,7 +3321,6 @@ def rotation_matrix_to_rpy_xyz_deg(R_mat):
         yaw = 0.0
 
     return np.rad2deg([roll, pitch, yaw])
-
 
 def make_axes_lineset(center, R_obj_cam, axis_size=0.04):
     """
@@ -3384,7 +3362,6 @@ def make_axes_lineset(center, R_obj_cam, axis_size=0.04):
     axes.colors = o3d.utility.Vector3dVector(colors)
 
     return axes
-
 
 def estimate_pose_axes_from_obb3d(
     obb_3d,
@@ -4300,6 +4277,301 @@ def dilate_final_objects(
 
     return dilated_objects, mask_before_all, mask_after_all, vis_img
 
+
+def get_axis_endpoints_inside_contour(center_xy, axis_v, contour, image_shape, margin_px=5, step_px=1):
+    """
+    중심점에서 axis_v 방향 양끝으로 가면서
+    contour 내부에 남아있는 마지막 지점을 찾음.
+    """
+    h, w = image_shape[:2]
+    center = np.array(center_xy, dtype=np.float64)
+    v = np.array(axis_v, dtype=np.float64)
+
+    norm = np.linalg.norm(v)
+    if norm < 1e-9:
+        return None, None
+
+    v = v / norm
+    max_len = int(np.hypot(w, h))
+
+    endpoints = []
+
+    for sign in [+1, -1]:
+        last_t = 0
+
+        for t in range(0, max_len, step_px):
+            p = center + sign * v * t
+            x, y = int(round(p[0])), int(round(p[1]))
+
+            if x < 0 or x >= w or y < 0 or y >= h:
+                break
+
+            inside = cv2.pointPolygonTest(contour, (float(x), float(y)), False)
+
+            if inside >= 0:
+                last_t = t
+            else:
+                break
+
+        # 경계 바로 끝은 노이즈가 많으니 살짝 안쪽으로 당김
+        safe_t = max(0, last_t - margin_px)
+        p_end = center + sign * v * safe_t
+        endpoints.append((int(round(p_end[0])), int(round(p_end[1]))))
+
+    return endpoints[0], endpoints[1]
+
+
+def make_endpoint_region_mask(endpoint_xy, contour, image_shape, radius_px=8):
+    """
+    endpoint 주변 원형 영역 중 contour 내부인 부분만 mask로 생성.
+    """
+    h, w = image_shape[:2]
+    ex, ey = endpoint_xy
+
+    contour_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(contour_mask, [contour], -1, 255, thickness=-1)
+
+    disk_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(disk_mask, (ex, ey), radius_px, 255, thickness=-1)
+
+    region_mask = cv2.bitwise_and(contour_mask, disk_mask)
+    return region_mask
+
+
+def get_lab_color_ratio_rgb4(color_rgb, region_mask):
+    """
+    region_mask 영역의 LAB 색을 보고
+    red / green / yellow / blue 중 nearest prototype 비율 계산.
+    """
+    valid = region_mask > 0
+
+    if np.count_nonzero(valid) == 0:
+        return {
+            "dominant": "unknown",
+            "ratio": {"red": 0.0, "green": 0.0, "yellow": 0.0, "blue": 0.0},
+            "count": 0
+        }
+
+    lab_img = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2LAB)
+    pixels_lab = lab_img[valid].astype(np.float32)
+
+    # RGB prototype -> LAB prototype
+    proto_rgb = np.array(
+        [[[255, 0, 0],
+          [0, 255, 0],
+          [255, 255, 0],
+          [0, 0, 255]]],
+        dtype=np.uint8
+    )
+
+    proto_lab = cv2.cvtColor(proto_rgb, cv2.COLOR_RGB2LAB)[0].astype(np.float32)
+
+    color_names = ["red", "green", "yellow", "blue"]
+
+    # L은 조명 영향이 크니까 약하게, a/b를 강하게 봄
+    weights = np.array([0.25, 1.0, 1.0], dtype=np.float32)
+
+    diff = pixels_lab[:, None, :] - proto_lab[None, :, :]
+    dist = np.sqrt(np.sum((diff * weights) ** 2, axis=2))
+
+    nearest = np.argmin(dist, axis=1)
+
+    total = len(nearest)
+    ratio = {}
+
+    for i, name in enumerate(color_names):
+        ratio[name] = float(np.count_nonzero(nearest == i) / total)
+
+    dominant = max(ratio, key=ratio.get)
+
+    return {
+        "dominant": dominant,
+        "ratio": ratio,
+        "count": int(total)
+    }
+
+
+def analyze_axis_end_colors(
+    color_rgb,
+    contour,
+    center_xy,
+    axis_v,
+    radius_px=8,
+    margin_px=5
+):
+    """
+    선택된 PCA 축의 양끝 endpoint 주변 색 비율 분석.
+    """
+    p_plus, p_minus = get_axis_endpoints_inside_contour(
+        center_xy=center_xy,
+        axis_v=axis_v,
+        contour=contour,
+        image_shape=color_rgb.shape[:2],
+        margin_px=margin_px
+    )
+
+    if p_plus is None or p_minus is None:
+        return None
+
+    plus_mask = make_endpoint_region_mask(
+        endpoint_xy=p_plus,
+        contour=contour,
+        image_shape=color_rgb.shape[:2],
+        radius_px=radius_px
+    )
+
+    minus_mask = make_endpoint_region_mask(
+        endpoint_xy=p_minus,
+        contour=contour,
+        image_shape=color_rgb.shape[:2],
+        radius_px=radius_px
+    )
+
+    plus_color = get_lab_color_ratio_rgb4(color_rgb, plus_mask)
+    minus_color = get_lab_color_ratio_rgb4(color_rgb, minus_mask)
+
+    return {
+        "plus_uv": p_plus,
+        "minus_uv": p_minus,
+        "plus_color": plus_color,
+        "minus_color": minus_color,
+        "plus_mask": plus_mask,
+        "minus_mask": minus_mask
+    }
+
+
+def make_hsv_target_color_mask(color_rgb, target_color, base_mask=None):
+    """
+    RGB 이미지에서 red / green / yellow / blue 중 target_color 마스크 생성.
+    base_mask가 있으면 그 내부에서만 계산.
+    """
+    hsv = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2HSV)
+
+    H = hsv[:, :, 0]
+    S = hsv[:, :, 1]
+    V = hsv[:, :, 2]
+
+    valid = (S > 40) & (V > 35)
+
+    if target_color == "red":
+        color_mask = ((H <= 10) | (H >= 170)) & valid
+
+    elif target_color == "yellow":
+        color_mask = (H >= 18) & (H <= 40) & valid
+
+    elif target_color == "green":
+        color_mask = (H >= 40) & (H <= 95) & valid
+
+    elif target_color == "blue":
+        color_mask = (H >= 90) & (H <= 135) & valid
+
+    else:
+        raise ValueError(f"Unknown target_color: {target_color}")
+
+    color_mask = color_mask.astype(np.uint8) * 255
+
+    if base_mask is not None:
+        base_mask_255 = ((base_mask > 0).astype(np.uint8) * 255)
+        color_mask = cv2.bitwise_and(color_mask, base_mask_255)
+
+    return color_mask
+
+def decide_bottom_side_by_color_projection(
+    color_rgb,
+    contour,
+    center_xy,
+    axis_v,
+    bottom_color,
+    min_pixels=30,
+    side_gap_threshold=0.15,
+    erode_px=3
+):
+    """
+    contour 내부에서 bottom_color 픽셀을 찾고,
+    그 픽셀들이 PCA 축의 plus/minus 어느 쪽에 많은지 판단.
+    """
+    h, w = color_rgb.shape[:2]
+
+    contour_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(contour_mask, [contour], -1, 255, thickness=-1)
+
+    if erode_px > 0:
+        kernel = np.ones((erode_px, erode_px), np.uint8)
+        contour_mask = cv2.erode(contour_mask, kernel, iterations=1)
+
+    target_mask = make_hsv_target_color_mask(
+        color_rgb=color_rgb,
+        target_color=bottom_color,
+        base_mask=contour_mask
+    )
+
+    ys, xs = np.where(target_mask > 0)
+
+    if len(xs) < min_pixels:
+        return {
+            "bottom_side": "unknown",
+            "bottom_color": bottom_color,
+            "target_pixel_count": int(len(xs)),
+            "plus_ratio": 0.0,
+            "minus_ratio": 0.0,
+            "target_mask": target_mask,
+            "target_centroid_uv": None
+        }
+
+    pts = np.stack([xs, ys], axis=1).astype(np.float64)
+
+    center = np.array(center_xy, dtype=np.float64)
+    v = np.array(axis_v, dtype=np.float64)
+
+    norm = np.linalg.norm(v)
+    if norm < 1e-9:
+        return {
+            "bottom_side": "unknown",
+            "bottom_color": bottom_color,
+            "target_pixel_count": int(len(xs)),
+            "plus_ratio": 0.0,
+            "minus_ratio": 0.0,
+            "target_mask": target_mask,
+            "target_centroid_uv": None
+        }
+
+    v = v / norm
+
+    # PCA 축 위로 projection
+    proj = (pts - center) @ v
+
+    plus_count = np.count_nonzero(proj > 0)
+    minus_count = np.count_nonzero(proj < 0)
+    total = len(proj)
+
+    plus_ratio = plus_count / total
+    minus_ratio = minus_count / total
+
+    if plus_ratio - minus_ratio > side_gap_threshold:
+        bottom_side = "plus"
+    elif minus_ratio - plus_ratio > side_gap_threshold:
+        bottom_side = "minus"
+    else:
+        bottom_side = "unknown"
+
+    target_centroid = np.mean(pts, axis=0)
+    target_centroid_uv = (
+        int(round(target_centroid[0])),
+        int(round(target_centroid[1]))
+    )
+
+    return {
+        "bottom_side": bottom_side,
+        "bottom_color": bottom_color,
+        "target_pixel_count": int(total),
+        "plus_ratio": float(plus_ratio),
+        "minus_ratio": float(minus_ratio),
+        "target_mask": target_mask,
+        "target_centroid_uv": target_centroid_uv
+    }
+
+
+
 ################################### 실행 함수
 
 def fine_correct(final_obj_fine,
@@ -4672,7 +4944,7 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
         raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH}")
 
     model = YOLO(MODEL_PATH)
-    target_classes = [0, 1, 3, 4, 5, 6, 8, 9]
+    target_classes = [0, 1, 2, 3, 4, 5, 6, 7, 8]
 
     results, mask_binary, vis_yolo = detect_objects_yolo(
         model= model, 
@@ -4762,7 +5034,6 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
 
     if V_visualize:
         print(f"[INFO] final_obj_fine 복사 완료: {len(final_obj_fine)} objects")
-
 
     # ============================================================
     # Hull 적용 완료된 이미지 확인
@@ -4944,18 +5215,18 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
             print("이제 파인으로 진입합니다.")
 
         # final_obj_fine 기준으로 dilation 적용
-        final_obj_fine, mask_dilate_before, mask_dilate_after, dilate_vis_img = dilate_final_objects(
+        final_obj_fine_a, mask_dilate_before, mask_dilate_after, dilate_vis_img = dilate_final_objects(
             final_obj_fine=final_obj_fine,
             image_shape=color_img_bgr.shape[:2],
             kernel_size=7,
-            iterations=1,
+            iterations=2,
             kernel_type="ellipse",
             visualize=V_visualize,
             color_img_bgr=color_img_bgr
         )
 
         pose_table, class_index = fine_correct(
-                    final_obj_fine=final_obj_fine,
+                    final_obj_fine=final_obj_fine_a,
                     color_rgb=color_rgb,
                     depth=depth,
                     scale=scale,
