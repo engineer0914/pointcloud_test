@@ -1,20 +1,24 @@
 import os
 import yaml
+import pprint
 import glob
 import cv2
 import math
 
+import torch
 import open3d as o3d
+from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
 
 import pyrealsense2 as rs
 import matplotlib.pyplot as plt
 from matplotlib import cm
+import pandas as pd
 import numpy as np
 import copy
 
 from scipy.spatial.transform import Rotation as R
-
+SCIPY_AVAILABLE = True
 
 CAMERA_PROFILES = {
     # 1. 바닥(Floor) 모드: RANSAC 평면 검출용 (넓고 강하게)
@@ -62,142 +66,6 @@ CAMERA_PROFILES = {
 
 # 카메라 설정 함수들
 
-
-def load_rgb_calibration_from_folder(
-    calib_folder,
-    yaml_name=None,
-    alpha=0,
-    make_undistort_map=True
-):
-    """
-    OpenCV RGB 캘리브레이션 YAML을 폴더 경로에서 불러오는 함수.
-
-    Parameters
-    ----------
-    calib_folder : str
-        YAML 파일이 들어있는 폴더 경로.
-    yaml_name : str or None
-        특정 YAML 파일명을 지정하고 싶을 때 사용.
-        None이면 폴더 안의 .yaml 또는 .yml 파일 중 첫 번째를 사용.
-    alpha : float
-        cv2.getOptimalNewCameraMatrix의 alpha.
-        0: 검은 영역 최소화 / crop 느낌
-        1: 시야 최대 보존
-    make_undistort_map : bool
-        True이면 remap용 map1, map2까지 생성.
-
-    Returns
-    -------
-    calib : dict
-        {
-            "image_width": int,
-            "image_height": int,
-            "checkerboard_inner_corners": dict,
-            "square_size_mm": float,
-            "rms_reprojection_error": float,
-            "K": np.ndarray,
-            "D": np.ndarray,
-            "new_K": np.ndarray or None,
-            "roi": tuple or None,
-            "map1": np.ndarray or None,
-            "map2": np.ndarray or None,
-            "yaml_path": str
-        }
-    """
-
-    calib_folder = os.path.abspath(calib_folder)
-
-    if not os.path.isdir(calib_folder):
-        raise FileNotFoundError(f"폴더가 없습니다: {calib_folder}")
-
-    # YAML 파일 찾기
-    if yaml_name is not None:
-        yaml_path = os.path.join(calib_folder, yaml_name)
-        if not os.path.isfile(yaml_path):
-            raise FileNotFoundError(f"YAML 파일이 없습니다: {yaml_path}")
-    else:
-        yaml_files = sorted(
-            glob.glob(os.path.join(calib_folder, "*.yaml")) +
-            glob.glob(os.path.join(calib_folder, "*.yml"))
-        )
-
-        if len(yaml_files) == 0:
-            raise FileNotFoundError(f"YAML 파일을 찾지 못했습니다: {calib_folder}")
-
-        yaml_path = yaml_files[0]
-
-    # YAML 로드
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    # 필수 값 확인
-    required_keys = [
-        "image_width",
-        "image_height",
-        "camera_matrix",
-        "dist_coeffs"
-    ]
-
-    for key in required_keys:
-        if key not in data:
-            raise KeyError(f"YAML에 '{key}' 항목이 없습니다: {yaml_path}")
-
-    w = int(data["image_width"])
-    h = int(data["image_height"])
-
-    K = np.array(data["camera_matrix"], dtype=np.float64)
-    D = np.array(data["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
-
-    new_K = None
-    roi = None
-    map1 = None
-    map2 = None
-
-    if make_undistort_map:
-        new_K, roi = cv2.getOptimalNewCameraMatrix(
-            K,
-            D,
-            (w, h),
-            alpha,
-            (w, h)
-        )
-
-        map1, map2 = cv2.initUndistortRectifyMap(
-            K,
-            D,
-            None,
-            new_K,
-            (w, h),
-            cv2.CV_32FC1
-        )
-
-    calib = {
-        "image_width": w,
-        "image_height": h,
-        "checkerboard_inner_corners": data.get("checkerboard_inner_corners", None),
-        "square_size_mm": data.get("square_size_mm", None),
-        "rms_reprojection_error": data.get("rms_reprojection_error", None),
-        "K": K,
-        "D": D,
-        "new_K": new_K,
-        "roi": roi,
-        "map1": map1,
-        "map2": map2,
-        "yaml_path": yaml_path,
-    }
-
-    print("[CALIB LOADED]")
-    print("yaml_path:", yaml_path)
-    print("image_size:", (w, h))
-    print("rms:", calib["rms_reprojection_error"])
-    print("K:\n", K)
-    print("D:", D.ravel())
-
-    if new_K is not None:
-        print("new_K:\n", new_K)
-        print("roi:", roi)
-
-    return calib
 
 def get_realsense_ids():
     """
@@ -3292,7 +3160,32 @@ def generate_3d_obbs_from_hull_objects(
 
     return objects_out, vis_elements_3d, overlay_geometries_3d, vis_2d_rgb, obb_results
 
+def rotation_matrix_to_rpy_xyz_deg(R_mat):
+    """
+    Camera frame 기준 roll, pitch, yaw 계산.
+    Convention:
+        R_mat columns = [object_x, object_y, object_z] in camera coordinates
+        Euler order = xyz
+    """
+    if SCIPY_AVAILABLE:
+        rpy = R.from_matrix(R_mat).as_euler("xyz", degrees=True)
+        return rpy  # roll, pitch, yaw
 
+    # scipy 없을 때 fallback
+    sy = np.sqrt(R_mat[0, 0] ** 2 + R_mat[1, 0] ** 2)
+
+    singular = sy < 1e-6
+
+    if not singular:
+        roll = np.arctan2(R_mat[2, 1], R_mat[2, 2])
+        pitch = np.arctan2(-R_mat[2, 0], sy)
+        yaw = np.arctan2(R_mat[1, 0], R_mat[0, 0])
+    else:
+        roll = np.arctan2(-R_mat[1, 2], R_mat[1, 1])
+        pitch = np.arctan2(-R_mat[2, 0], sy)
+        yaw = 0.0
+
+    return np.rad2deg([roll, pitch, yaw])
 
 def make_axes_lineset(center, R_obj_cam, axis_size=0.04):
     """
@@ -3433,7 +3326,7 @@ def estimate_pose_axes_from_obb3d(
         y_axis = -y_axis
         R_obj_cam = np.column_stack([x_axis, y_axis, z_axis])
 
-    rpy_deg = R.from_matrix(R_obj_cam).as_euler("xyz", degrees=True)
+    rpy_deg = rotation_matrix_to_rpy_xyz_deg(R_obj_cam)
 
     axes_3d = make_axes_lineset(
         center=center,

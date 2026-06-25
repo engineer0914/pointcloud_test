@@ -149,3 +149,87 @@ def VISUALIZE_COLOR_AND_DEPTH(color_img_bgr, depth_img):
 3. 옆면 정보 포함한 6D
 
 ## **조립체**
+
+
+
+
+OPENCV GPU 버전으로 변환
+
+cv2.cvtColor        → cv2.cuda.cvtColor
+cv2.resize          → cv2.cuda.resize
+cv2.threshold       → cv2.cuda.threshold
+cv2.morphologyEx    → cv2.cuda.createMorphologyFilter
+cv2.GaussianBlur    → cv2.cuda.createGaussianFilter
+cv2.medianBlur      → cv2.cuda.createMedianFilter
+cv2.bitwise_and     → cv2.cuda.bitwise_and
+cv2.bitwise_or      → cv2.cuda.bitwise_or
+
+
+쿠다로 변경되는 함수
+
+depth_to_xyz_map()
+fit_plane_ransac_numpy()
+compute_plane_distance_map()
+pca_2d_from_mask()
+pca_3d_from_mask()
+detect_objects_yolo()
+
+
+
+opencv가 쿠다 빌드인지 확인
+
+python -c "import cv2; print(cv2.__version__); print(cv2.cuda.getCudaEnabledDeviceCount()); print('CUDA' in cv2.getBuildInformation())"
+
+
+
+젯슨 욜로 모델 변환
+
+yolo export model=best.pt format=engine imgsz=640 device=0 half=True
+
+임포트시 model = YOLO("best.engine")
+
+
+
+
+
+import time
+
+t0 = time.perf_counter()
+
+pose_table, class_index = ivl.search_bricks(
+    mode="coarse",
+    yolo_dir=yolo_dir,
+    color_rgb=color_rgb,
+    depth=depth,
+    intrinsics=intrinsics,
+    scale=scale,
+    V_visualize=False
+)
+
+t1 = time.perf_counter()
+print(f"search_bricks 전체 시간: {(t1 - t0) * 1000:.1f} ms")
+
+
+
+
+아래의 예시 처럼 볼것
+
+t = time.perf_counter()
+
+results, mask_binary, vis_yolo = detect_objects_yolo(...)
+
+print(f"[TIME] 
+YOLO: 
+{(time.perf_counter() - t)*1000:.1f} ms")
+
+t = time.perf_counter()
+final_objects, clean_mask = filter_overlapping_masks(...)
+print(f"[TIME] mask overlap: {(time.perf_counter() - t)*1000:.1f} ms")
+
+t = time.perf_counter()
+mask_40mm_2d, refined_color, contours, plane_model = extract_3d_protruding_objects(...)
+print(f"[TIME] depth/ransac: {(time.perf_counter() - t)*1000:.1f} ms")
+
+t = time.perf_counter()
+objects_obb, vis_3d, overlay_3d, vis_2d_rgb, obb_results = generate_3d_obbs_from_hull_objects(...)
+print(f"[TIME] 3D OBB: {(time.perf_counter() - t)*1000:.1f} ms")

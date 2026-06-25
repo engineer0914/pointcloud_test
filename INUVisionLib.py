@@ -360,7 +360,6 @@ def configure_realsense(
     # 리턴 값에 thres_filter 추가!
     return pipeline, align, temp_filter, thres_filter
 
-# 컨트롤 실행부 함수들
 def capture_realsense_data(serial_number, mode="mid_50", warmup_frames=10, visualize=False):
     """
     특정 리얼센스 카메라를 지정한 모드로 켜서 예열한 뒤, 핵심 비전 데이터를 추출하는 함수.
@@ -595,7 +594,6 @@ def get_aligned_frames_with_units(
     return depth_image, color_image, depth_scale_used, debug_info
 
 
-# 조립체 분석용 함수들
 
 def depth_to_xyz_map(depth_img, depth_scale, intrinsics):
     """
@@ -1406,10 +1404,6 @@ def visualize_contour_pca_axes(
 
     return draw
 
-
-
-# 포인트 클라우드 함수
-
 def refine_2d_mask_with_hull(projected_mask_01, color_bgr):
     """
     파먹히고 조각난 2D 투영 마스크(0 or 1)를 Convex Hull과 모폴로지 연산을 
@@ -1536,8 +1530,6 @@ def create_floor_anchored_3d_box(box_2d, intrinsics, plane_normal, d, max_h, col
     line_set.lines = o3d.utility.Vector2iVector(lines)
     line_set.colors = o3d.utility.Vector3dVector(colors)
     return line_set
-
-# 컨트롤 함수
 
 def detect_objects_yolo(model, color_img_bgr, target_classes=None, visualize=False):
     """
@@ -2052,6 +2044,260 @@ def extract_3d_protruding_objects(depth_img, color_img_bgr, intrinsics, depth_sc
         axes[2].imshow(cv2.cvtColor(vis_refined_color, cv2.COLOR_BGR2RGB))
         axes[2].set_title("3. Refined Color Objects")
         axes[2].axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    return closed_mask, refined_color_img, contours, plane_model
+
+def extract_3d_protruding_objects_fast_torch(
+    depth_img,
+    color_img_bgr,
+    intrinsics,
+    depth_scale,
+    yolo_combined_mask=None,
+    depth_trunc=1.5,
+    height_threshold=0.005,
+    ransac_distance_threshold=0.015,
+    num_iter=700,
+    max_points=20000,
+    random_seed=0,
+    visualize=False,
+    device=None,
+):
+    """
+    Open3D PointCloud/DBSCAN 없이 depth map에서 바로 바닥 plane과 돌출 mask를 계산하는 GPU-friendly 버전.
+
+    반환:
+        closed_mask, refined_color_img, contours, plane_model
+    """
+    import cv2
+    import numpy as np
+    import torch
+    import matplotlib.pyplot as plt
+
+    if device is None:
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    if visualize:
+        print("\n[INFO] Fast Torch 3D protruding object extraction start")
+        print("[INFO] device:", device)
+
+    # ------------------------------------------------------------
+    # 0. 약한 depth median은 일단 CPU OpenCV 유지
+    # ------------------------------------------------------------
+    filtered_depth_img = cv2.medianBlur(depth_img, 5)
+
+    H, W = filtered_depth_img.shape[:2]
+
+    # ------------------------------------------------------------
+    # 1. YOLO mask 영역을 바닥 plane fitting에서 제외
+    # ------------------------------------------------------------
+    if yolo_combined_mask is not None:
+        kernel = np.ones((7, 7), np.uint8)
+        expanded_yolo_mask = cv2.dilate(
+            yolo_combined_mask.astype(np.uint8),
+            kernel,
+            iterations=3
+        )
+    else:
+        expanded_yolo_mask = np.zeros((H, W), dtype=np.uint8)
+
+    # ------------------------------------------------------------
+    # 2. depth -> xyz_map, GPU
+    # ------------------------------------------------------------
+    depth_t = torch.as_tensor(
+        filtered_depth_img,
+        device=device,
+        dtype=torch.float32
+    )
+
+    z = depth_t * float(depth_scale)
+
+    valid_mask_t = (z > 0) & (z < float(depth_trunc))
+
+    v_grid, u_grid = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing="ij"
+    )
+
+    x = (u_grid - float(intrinsics.ppx)) / float(intrinsics.fx) * z
+    y = (v_grid - float(intrinsics.ppy)) / float(intrinsics.fy) * z
+
+    xyz_map_t = torch.stack([x, y, z], dim=-1)
+    xyz_map_t[~valid_mask_t] = 0.0
+
+    # ------------------------------------------------------------
+    # 3. 바닥 후보 포인트 추출
+    # ------------------------------------------------------------
+    expanded_yolo_mask_t = torch.as_tensor(
+        expanded_yolo_mask > 0,
+        device=device,
+        dtype=torch.bool
+    )
+
+    bg_valid_t = valid_mask_t & (~expanded_yolo_mask_t)
+
+    bg_points_t = xyz_map_t[bg_valid_t]
+
+    if bg_points_t.shape[0] < 100:
+        print("❌ [ERROR] 바닥 검출을 위한 유효한 3D 포인트가 부족합니다.")
+        return None, None, None, None
+
+    # ------------------------------------------------------------
+    # 4. RANSAC용 포인트 샘플링
+    # ------------------------------------------------------------
+    total_N = bg_points_t.shape[0]
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(random_seed))
+
+    if total_N > max_points:
+        idx = torch.randperm(total_N, device=device, generator=gen)[:max_points]
+        sample_points = bg_points_t[idx]
+    else:
+        sample_points = bg_points_t
+
+    N = sample_points.shape[0]
+
+    if N < 3:
+        print("❌ [ERROR] RANSAC 샘플 포인트 부족")
+        return None, None, None, None
+
+    # ------------------------------------------------------------
+    # 5. Batch RANSAC plane fitting
+    # ------------------------------------------------------------
+    ids = torch.randint(
+        low=0,
+        high=N,
+        size=(int(num_iter), 3),
+        device=device,
+        generator=gen
+    )
+
+    p1 = sample_points[ids[:, 0]]
+    p2 = sample_points[ids[:, 1]]
+    p3 = sample_points[ids[:, 2]]
+
+    v1 = p2 - p1
+    v2 = p3 - p1
+
+    normals = torch.cross(v1, v2, dim=1)
+    norms = torch.linalg.norm(normals, dim=1, keepdim=True)
+
+    valid_planes = norms[:, 0] > 1e-8
+
+    if torch.count_nonzero(valid_planes) == 0:
+        print("❌ [ERROR] 유효한 RANSAC plane 후보 없음")
+        return None, None, None, None
+
+    normals = normals[valid_planes] / norms[valid_planes]
+    p1_valid = p1[valid_planes]
+
+    d_vals = -torch.sum(normals * p1_valid, dim=1)
+
+    distances = torch.abs(sample_points @ normals.T + d_vals[None, :])
+    inlier_masks = distances < float(ransac_distance_threshold)
+    inlier_counts = torch.sum(inlier_masks, dim=0)
+
+    best_idx = torch.argmax(inlier_counts)
+    best_inlier_mask = inlier_masks[:, best_idx]
+
+    if torch.count_nonzero(best_inlier_mask) < 3:
+        print("❌ [ERROR] RANSAC inlier 부족")
+        return None, None, None, None
+
+    # ------------------------------------------------------------
+    # 6. Inlier로 plane refinement, SVD
+    # ------------------------------------------------------------
+    inlier_points = sample_points[best_inlier_mask]
+
+    centroid = torch.mean(inlier_points, dim=0)
+    centered = inlier_points - centroid
+
+    _, _, vh = torch.linalg.svd(centered, full_matrices=False)
+
+    normal = vh[-1]
+    normal = normal / torch.linalg.norm(normal)
+
+    d = -torch.dot(normal, centroid)
+
+    # ------------------------------------------------------------
+    # 7. normal 방향 안정화
+    # 기존 코드와 맞춰 c > 0이면 뒤집음
+    # ------------------------------------------------------------
+    if normal[2] > 0:
+        normal = -normal
+        d = -d
+
+    plane_t = torch.cat([normal, d.reshape(1)]).to(torch.float32)
+
+    # ------------------------------------------------------------
+    # 8. 전체 depth map에서 signed height 계산
+    # ------------------------------------------------------------
+    signed_height_t = (
+        xyz_map_t[..., 0] * plane_t[0] +
+        xyz_map_t[..., 1] * plane_t[1] +
+        xyz_map_t[..., 2] * plane_t[2] +
+        plane_t[3]
+    )
+
+    object_mask_t = valid_mask_t & (signed_height_t > float(height_threshold))
+
+    object_count = int(torch.count_nonzero(object_mask_t).detach().cpu().item())
+
+    print(f"✅ {height_threshold * 1000:.1f}mm 이상 돌출된 객체 픽셀: {object_count}개")
+
+    # ------------------------------------------------------------
+    # 9. 여기서부터 CPU OpenCV 후처리
+    # ------------------------------------------------------------
+    object_mask_2d = object_mask_t.detach().cpu().numpy().astype(np.uint8)
+
+    kernel_fill = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    object_mask_filled = cv2.dilate(object_mask_2d, kernel_fill, iterations=1)
+    object_mask_filled = cv2.morphologyEx(
+        object_mask_filled,
+        cv2.MORPH_CLOSE,
+        kernel_fill
+    )
+
+    mask_255 = (object_mask_filled * 255).astype(np.uint8)
+
+    kernel_close = np.ones((7, 7), np.uint8)
+    closed_mask = cv2.morphologyEx(mask_255, cv2.MORPH_CLOSE, kernel_close)
+
+    contours, _ = cv2.findContours(
+        closed_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    refined_color_img = cv2.bitwise_and(
+        color_img_bgr,
+        color_img_bgr,
+        mask=closed_mask
+    )
+
+    plane_model = plane_t.detach().cpu().numpy().astype(np.float32)
+
+    if visualize:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+        axes[0].imshow(object_mask_filled, cmap="gray")
+        axes[0].set_title("1. Original Protruding Mask")
+        axes[0].axis("off")
+
+        axes[1].imshow(closed_mask, cmap="gray")
+        axes[1].set_title("2. Morphological Closed Mask")
+        axes[1].axis("off")
+
+        vis_refined_color = refined_color_img.copy()
+        cv2.drawContours(vis_refined_color, contours, -1, (0, 255, 0), 2)
+
+        axes[2].imshow(cv2.cvtColor(vis_refined_color, cv2.COLOR_BGR2RGB))
+        axes[2].set_title("3. Refined Color Objects")
+        axes[2].axis("off")
+
         plt.tight_layout()
         plt.show()
 
@@ -4278,7 +4524,6 @@ def dilate_final_objects(
 
     return dilated_objects, mask_before_all, mask_after_all, vis_img
 
-
 def get_axis_endpoints_inside_contour(center_xy, axis_v, contour, image_shape, margin_px=5, step_px=1):
     """
     중심점에서 axis_v 방향 양끝으로 가면서
@@ -4321,7 +4566,6 @@ def get_axis_endpoints_inside_contour(center_xy, axis_v, contour, image_shape, m
 
     return endpoints[0], endpoints[1]
 
-
 def make_endpoint_region_mask(endpoint_xy, contour, image_shape, radius_px=8):
     """
     endpoint 주변 원형 영역 중 contour 내부인 부분만 mask로 생성.
@@ -4337,7 +4581,6 @@ def make_endpoint_region_mask(endpoint_xy, contour, image_shape, radius_px=8):
 
     region_mask = cv2.bitwise_and(contour_mask, disk_mask)
     return region_mask
-
 
 def get_lab_color_ratio_rgb4(color_rgb, region_mask):
     """
@@ -4391,7 +4634,6 @@ def get_lab_color_ratio_rgb4(color_rgb, region_mask):
         "count": int(total)
     }
 
-
 def analyze_axis_end_colors(
     color_rgb,
     contour,
@@ -4439,7 +4681,6 @@ def analyze_axis_end_colors(
         "plus_mask": plus_mask,
         "minus_mask": minus_mask
     }
-
 
 def make_hsv_target_color_mask(color_rgb, target_color, base_mask=None):
     """
@@ -4610,6 +4851,7 @@ def fine_correct(final_obj_fine,
     depth,
     scale,
     intrinsics,
+    plane_model,
     V_visualize=True
     ):
 
@@ -4626,7 +4868,8 @@ def fine_correct(final_obj_fine,
     valid_points = xyz_map[valid_mask]
 
     # 0-2. RANSAC 평면 피팅 (바닥 찾기)
-    best_plane, _ = fit_plane_ransac_numpy(valid_points, distance_threshold=0.006)
+    # best_plane, _ = fit_plane_ransac_numpy(valid_points, distance_threshold=0.006)
+    best_plane = plane_model
 
     # 0-3. 바닥 평면으로부터의 Z축 거리(높이) 계산
     dist_map = compute_plane_distance_map(xyz_map, valid_mask, best_plane)
@@ -4677,7 +4920,6 @@ def fine_correct(final_obj_fine,
     ransac_mask = cv2.dilate(hull_mask, kernel_pad, iterations=1) # 다음 단계로 넘기기 위해 변수명 원상복구 
     # 0-5. RGB 이미지에 마스크 씌우기 (바닥 부분은 완전히 검정색으로)
     img_rgb = cv2.bitwise_and(img_rgb, img_rgb, mask=ransac_mask)
-
 
     # ============================================================
     # Step 1: 양방향 필터 (Bilateral Filter) 적용
@@ -4748,7 +4990,6 @@ def fine_correct(final_obj_fine,
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
     # ====================================================================
-
 
     # ============================================================
     # Step 9: 쿠키 틀 바인딩 및 규격화된 pose_table 생성
@@ -5051,7 +5292,6 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
         plt.tight_layout()
         plt.show()
 
-
     # 바운딩 박스가 겹치는 부분을 억제 = 겹치는 마스크 깔끔하게 정리
     final_objects, clean_mask = filter_overlapping_masks(
         results=results, 
@@ -5064,15 +5304,17 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
     # 높이 차이 확인 + 바운딩 박스 비율 기반 ID 수정 + Convex Hull로 패딩
     #======================================================================================
 
-    # DBSCAN + RANSAC 바닥 검출
-    mask_40mm_2d, refined_color, contours, plane_model = extract_3d_protruding_objects(
-        depth_img=depth, 
-        color_img_bgr=color_img_bgr, 
-        intrinsics=intrinsics, 
-        depth_scale=scale, 
+    mask_40mm_2d, refined_color, contours, plane_model = extract_3d_protruding_objects_fast_torch(
+        depth_img=depth,
+        color_img_bgr=color_img_bgr,
+        intrinsics=intrinsics,
+        depth_scale=scale,
         yolo_combined_mask=clean_mask,
         depth_trunc=5.0,
         height_threshold=0.040,
+        ransac_distance_threshold=0.015,
+        num_iter=700,
+        max_points=20000,
         visualize=V_visualize
     )
 
@@ -5111,183 +5353,6 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
     # ============================================================
     final_obj_fine = copy.deepcopy(final_objects)
 
-    if V_visualize:
-        print(f"[INFO] final_obj_fine 복사 완료: {len(final_obj_fine)} objects")
-
-    # ============================================================
-    # Hull 적용 완료된 이미지 확인
-    # ============================================================
-    if V_visualize:
-        color_img_rgb = cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB)
-
-        # 0/1 mask -> 0/255로 변환
-        before_vis = ((mask_before > 0).astype(np.uint8) * 255)
-        after_vis = ((mask_hull_after > 0).astype(np.uint8) * 255)
-
-        # after 마스크를 원본 컬러에 씌운 결과
-        refined_after = cv2.bitwise_and(color_img_bgr, color_img_bgr, mask=after_vis)
-        # refined_after_rgb = cv2.cvtColor(refined_after, cv2.COLOR_BGR2RGB)
-
-        # after contour 그리기
-        overlay_rgb = color_img_rgb.copy()
-        contours, _ = cv2.findContours(after_vis, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay_rgb, contours, -1, (0, 255, 0), 2)
-
-        fig, axes = plt.subplots(1, 4, figsize=(18, 6))
-
-        axes[0].imshow(color_img_rgb)
-        axes[0].set_title("Original")
-        axes[0].axis("off")
-
-        axes[1].imshow(before_vis, cmap="gray")
-        axes[1].set_title("Mask Before Hull")
-        axes[1].axis("off")
-
-        axes[2].imshow(after_vis, cmap="gray")
-        axes[2].set_title("Mask After Hull")
-        axes[2].axis("off")
-
-        axes[3].imshow(overlay_rgb)
-        axes[3].set_title("Hull Overlay")
-        axes[3].axis("off")
-
-        p_title="Convex Hull Mask Result"
-        plt.suptitle(p_title)
-        plt.tight_layout()
-        plt.show()
-
-    # =================================================================
-    # Convex Hull + 마스크 기준으로 바닥/PCD 재생성 + 3D OBB 생성
-    # =================================================================
-
-    pcd_data, plane_data, floor_pcd = build_floor_scene_data_from_depth(
-        depth_img=depth,
-        intrinsics=intrinsics,
-        depth_scale=scale,
-        object_mask_01=mask_hull_after,
-        depth_trunc=5.0,
-        voxel_size=0.003,
-        plane_dist_thresh=0.015,
-        floor_height_eps=0.005,
-        visualize=V_visualize
-    )
-
-    # OBB 재생성
-    objects_obb, vis_3d, overlay_3d, vis_2d_rgb, obb_results = generate_3d_obbs_from_hull_objects(
-        objects=final_objects,
-        refined_mask_01=mask_hull_after,
-        pcd_data=pcd_data,
-        plane_data=plane_data,
-        intrinsics=intrinsics,
-        color_img_rgb=color_rgb,
-        floor_pcd=floor_pcd,
-        min_height=0.024,
-        max_height_limit=0.12,
-        height_percentile=95,
-        visualize_2d=V_visualize
-    )
-
-    # =================================================================
-    # 3D OBB 기준 객체 좌표계 + Camera 기준 RPY 계산
-    # =================================================================
-
-    pose_results = []
-    axes_geometries = []
-    plane_normal = plane_data["normal"]
-
-    for idx, obj in enumerate(objects_obb):
-        obb_3d = obj.get("obb_3d", None)
-        class_name = obj.get("class_name", "unknown")
-
-        pose = estimate_pose_axes_from_obb3d(
-            obb_3d=obb_3d,
-            plane_normal=plane_normal,
-            class_name=class_name,
-            axis_size=0.04
-        )
-
-        if pose is None:
-            print(f"[SKIP] idx {idx}: pose 계산 실패")
-            continue
-
-        obj["pose_cam"] = pose
-        pose_results.append({
-            "idx": idx,
-            "class_name": class_name,
-            "center_mm": pose["center_mm"],
-            "roll_deg": pose["roll_deg"],
-            "pitch_deg": pose["pitch_deg"],
-            "yaw_deg": pose["yaw_deg"],
-            "R_obj_cam": pose["R_obj_cam"],
-        })
-
-        axes_geometries.append(pose["axes_3d"])
-
-        c = pose["center_mm"]
-
-        # print(
-        #     f"idx {idx:02d} | {class_name:20s} | "
-        #     f"center(mm)=({c[0]:7.1f}, {c[1]:7.1f}, {c[2]:7.1f}) | "
-        #     f"RPY(deg)=({pose['roll_deg']:7.2f}, "
-        #     f"{pose['pitch_deg']:7.2f}, "
-        #     f"{pose['yaw_deg']:7.2f})"
-        # )
-
-        # 기존 3D OBB geometry에 좌표축 추가
-    vis_3d_with_axes = vis_3d + axes_geometries
-    overlay_3d_with_axes = overlay_3d + axes_geometries
-
-    if V_visualize:
-        print("\n[INFO] 3D OBB + Object Coordinate Axes 표시")
-        o3d.visualization.draw_geometries(
-            vis_3d_with_axes,
-            window_name="3D OBB + Object XYZ Axes"
-        )
-
-    color_o3d = o3d.geometry.Image(color_rgb)
-    depth_o3d = o3d.geometry.Image(cv2.medianBlur(depth, 5))
-
-    o3d_intr = o3d.camera.PinholeCameraIntrinsic(
-        int(intrinsics.width),
-        int(intrinsics.height),
-        float(intrinsics.fx),
-        float(intrinsics.fy),
-        float(intrinsics.ppx),
-        float(intrinsics.ppy)
-    )
-
-    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        color_o3d,
-        depth_o3d,
-        depth_scale=1.0 / float(scale),
-        depth_trunc=5.0,
-        convert_rgb_to_intensity=False
-    )
-
-    rgb_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-        rgbd_image,
-        o3d_intr
-    )
-
-    rgb_pcd = rgb_pcd.voxel_down_sample(voxel_size=0.0015)
-
-    final_overlay_elements = [rgb_pcd] + overlay_3d_with_axes
-
-    if V_visualize:
-        print("\n[INFO] RGB-D PointCloud + 3D OBB + Object Axes 표시")
-        o3d.visualization.draw_geometries(
-            final_overlay_elements,
-            window_name="RGB-D PointCloud + Object XYZ Axes"
-        )
-
-    pose_table, class_index = build_class_sorted_pose_index(
-        objects_obb=objects_obb,
-        use_pose_cam=True,
-        remove_c_prefix=True,
-        remove_side2=False,
-        verbose=False
-    )
-
     if mode == 'fine':
 
         if V_visualize:
@@ -5304,12 +5369,15 @@ def search_bricks(mode, yolo_dir, color_rgb, depth, intrinsics, scale, V_visuali
             color_img_bgr=color_img_bgr
         )
 
+        final_obj_fine_b = final_obj_fine_a.copy()
+
         pose_table, class_index = fine_correct(
-                    final_obj_fine=final_obj_fine_a,
+                    final_obj_fine=final_obj_fine_b,
                     color_rgb=color_rgb,
                     depth=depth,
                     scale=scale,
                     intrinsics=intrinsics,
+                    plane_model=plane_model,
                     V_visualize=V_visualize
                 )
 
@@ -5712,7 +5780,6 @@ def search_assembly(
 
     return pose_table, class_index
 
-
 def search_assembly_9(
     color_rgb,
     depth,
@@ -5911,7 +5978,6 @@ def search_assembly_9(
         )
 
     return pose_table, class_index
-
 
 def search_assembly_8(color_rgb, depth, intrinsics, scale, V_visualize=True):
     img_rgb = color_rgb.copy()
