@@ -328,3 +328,35 @@ tqdm>=4.67.0
 # xkit==0.0.0
 # zipp==1.0.0
 # zstandard==0.25.0
+
+
+
+def pca_2d_from_mask(mask):
+def pca_3d_from_mask(mask, xyz_map, valid_mask):
+def visualize_components_pca(
+def refine_2d_mask_with_hull(projected_mask_01, color_bgr):
+def create_floor_anchored_3d_box_with_axes(box_2d, intrinsics, plane_normal, d, max_h, color, axis_size=0.03):
+def create_floor_anchored_3d_box(box_2d, intrinsics, plane_normal, d, max_h, color):
+def estimate_floor_plane(depth_img, yolo_combined_mask, intrinsics, depth_scale, depth_trunc=1.5,visualize=False):
+def extract_high_objects_mask(filtered_depth_img, plane_normal, d, intrinsics, depth_scale, color_img_shape, height_threshold=0.040, visualize=False):
+def process_scene_and_get_height_masks(depth_img, intrinsics, depth_scale, color_img_shape):
+def fuse_yolo_and_generate_3d_obbs(detected_objects, refined_mask_01, mask_40mm_2d, pcd_data, plane_data, intrinsics, color_img_rgb, floor_pcd=None):
+def visualize_final_rgbd_pointcloud(color_img_rgb, depth_img, intrinsics, depth_scale, refined_mask_01, mask_high_vis, vis_image_2d, vis_elements_3d, overlay_geometries_3d):
+def fill_object_mask_holes(mask):
+def visualize_id_correction_and_final_segments(
+def add_side2_suffix_for_high_corrected_objects(
+def project_pixel_to_plane(u, v, intrinsics, plane_normal, plane_d):
+def create_floor_anchored_box_lineset(
+def rotation_matrix_to_rpy_xyz_deg(R_mat):
+def make_axes_lineset(center, R_obj_cam, axis_size=0.04):
+def normalize_class_name(name, remove_c_prefix=True, remove_side2=False):
+def get_nearest_6d_pose_by_class(
+def visualize_3d_obb_results(
+def project_point_to_image(pt_3d, intrinsics):
+def visualize_class_pose_on_rgb(
+def get_axis_endpoints_inside_contour(center_xy, axis_v, contour, image_shape, margin_px=5, step_px=1):
+def make_endpoint_region_mask(endpoint_xy, contour, image_shape, radius_px=8):
+def get_lab_color_ratio_rgb4(color_rgb, region_mask):
+def analyze_axis_end_colors(
+def make_hsv_target_color_mask(color_rgb, target_color, base_mask=None):
+def decide_bottom_side_by_color_projection(

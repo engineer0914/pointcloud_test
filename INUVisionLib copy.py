@@ -1,24 +1,20 @@
 import os
 import yaml
-import pprint
 import glob
 import cv2
 import math
 
-import torch
 import open3d as o3d
-from sklearn.cluster import DBSCAN
 from ultralytics import YOLO
 
 import pyrealsense2 as rs
 import matplotlib.pyplot as plt
 from matplotlib import cm
-import pandas as pd
 import numpy as np
 import copy
 
 from scipy.spatial.transform import Rotation as R
-SCIPY_AVAILABLE = True
+
 
 CAMERA_PROFILES = {
     # 1. 바닥(Floor) 모드: RANSAC 평면 검출용 (넓고 강하게)
@@ -3296,32 +3292,7 @@ def generate_3d_obbs_from_hull_objects(
 
     return objects_out, vis_elements_3d, overlay_geometries_3d, vis_2d_rgb, obb_results
 
-def rotation_matrix_to_rpy_xyz_deg(R_mat):
-    """
-    Camera frame 기준 roll, pitch, yaw 계산.
-    Convention:
-        R_mat columns = [object_x, object_y, object_z] in camera coordinates
-        Euler order = xyz
-    """
-    if SCIPY_AVAILABLE:
-        rpy = R.from_matrix(R_mat).as_euler("xyz", degrees=True)
-        return rpy  # roll, pitch, yaw
 
-    # scipy 없을 때 fallback
-    sy = np.sqrt(R_mat[0, 0] ** 2 + R_mat[1, 0] ** 2)
-
-    singular = sy < 1e-6
-
-    if not singular:
-        roll = np.arctan2(R_mat[2, 1], R_mat[2, 2])
-        pitch = np.arctan2(-R_mat[2, 0], sy)
-        yaw = np.arctan2(R_mat[1, 0], R_mat[0, 0])
-    else:
-        roll = np.arctan2(-R_mat[1, 2], R_mat[1, 1])
-        pitch = np.arctan2(-R_mat[2, 0], sy)
-        yaw = 0.0
-
-    return np.rad2deg([roll, pitch, yaw])
 
 def make_axes_lineset(center, R_obj_cam, axis_size=0.04):
     """
@@ -3462,7 +3433,7 @@ def estimate_pose_axes_from_obb3d(
         y_axis = -y_axis
         R_obj_cam = np.column_stack([x_axis, y_axis, z_axis])
 
-    rpy_deg = rotation_matrix_to_rpy_xyz_deg(R_obj_cam)
+    rpy_deg = R.from_matrix(R_obj_cam).as_euler("xyz", degrees=True)
 
     axes_3d = make_axes_lineset(
         center=center,
