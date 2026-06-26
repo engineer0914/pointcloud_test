@@ -64,6 +64,109 @@ CAMERA_PROFILES = {
     }
 }
 
+CLASS_COLOR_POSE_CONFIG = {
+
+    "Battery": {
+        "color_axis": "major",
+        "top_color": "yellow",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "Magnet": {
+        "color_axis": "major",
+        "top_color": "blue",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "EStop": {
+        "color_axis": "minor",
+        "top_color": "red",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "Carrot": {
+        "color_axis": "major",
+        "top_color": "green",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "TrafficLight": {
+        "color_axis": "major",
+        "top_color": "red",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "SmallTree": {
+        "color_axis": "major",
+        "top_color": "green",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "Hammer": {
+        "color_axis": "major",
+        "top_color": "blue",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "BigCarrot": {
+        "color_axis": "major",
+        "top_color": "green",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "Burger": {
+        "color_axis": "minor",
+        "top_color": "yellow",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "IceCream": {
+        "color_axis": "major",
+        "top_color": "green",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    },
+
+    "BigTree": {
+        "color_axis": "minor",
+        "top_color": "green",
+        "radius_px": 8,
+        "sample_frac": 0.82,
+        "min_s": 45,
+        "min_v": 35,
+    }
+
+}
+
 # 카메라 설정 함수들
 
 
@@ -592,8 +695,6 @@ def get_aligned_frames_with_units(
     }
 
     return depth_image, color_image, depth_scale_used, debug_info
-
-
 
 def depth_to_xyz_map(depth_img, depth_scale, intrinsics):
     """
@@ -4812,6 +4913,1214 @@ def decide_bottom_side_by_color_projection(
         "target_centroid_uv": target_centroid_uv
     }
 
+################################### 완성체 쪽 함수
+
+def normalize_yaw_deg_180(yaw_deg):
+    """
+    -180 ~ +180 범위 정규화.
+    top/bottom 방향을 구분하려면 -90~90으로 접으면 안 됨.
+    """
+    return (float(yaw_deg) + 180.0) % 360.0 - 180.0
+
+def get_class_color_pose_cfg(class_id, class_name, config):
+    """
+    class_id 또는 class_name으로 색상 pose 설정 검색.
+    class_id 우선.
+    """
+    if config is None:
+        return None
+
+    if class_id in config:
+        return config[class_id]
+
+    if str(class_id) in config:
+        return config[str(class_id)]
+
+    if class_name in config:
+        return config[class_name]
+
+    return None
+
+def hue_dist_cv(h, target_h):
+    """
+    OpenCV HSV hue: 0~179 원형 거리
+    """
+    d = np.abs(h.astype(np.float32) - float(target_h))
+    return np.minimum(d, 180.0 - d)
+
+def classify_hsv_basic_colors(hsv_pixels):
+    """
+    hsv_pixels: N x 3, OpenCV HSV 기준
+    return:
+        pred_color, ratios, mean_h
+    """
+
+    if hsv_pixels is None or len(hsv_pixels) == 0:
+        return "unknown", {
+            "red": 0.0,
+            "yellow": 0.0,
+            "green": 0.0,
+            "blue": 0.0,
+        }, None
+
+    h = hsv_pixels[:, 0].astype(np.float32)
+
+    # OpenCV HSV hue 기준 대표값
+    # red는 0 근처와 179 근처가 이어져 있으므로 둘 다 처리
+    color_anchors = {
+        "red": [0, 179],
+        "yellow": [30],
+        "green": [60],
+        "blue": [110],
+    }
+
+    labels = []
+    for hv in h:
+        best_label = None
+        best_dist = 1e9
+
+        for cname, anchors in color_anchors.items():
+            d = min(abs(hv - a) if abs(hv - a) <= 90 else 180 - abs(hv - a)
+                    for a in anchors)
+
+            if d < best_dist:
+                best_dist = d
+                best_label = cname
+
+        labels.append(best_label)
+
+    counts = {
+        "red": 0,
+        "yellow": 0,
+        "green": 0,
+        "blue": 0,
+    }
+
+    for lb in labels:
+        if lb in counts:
+            counts[lb] += 1
+
+    total = max(1, len(labels))
+    ratios = {k: float(v) / total for k, v in counts.items()}
+
+    pred_color = max(ratios.keys(), key=lambda k: ratios[k])
+
+    # hue 평균은 red wrap 문제 때문에 디버그용 정도로만 사용
+    mean_h = float(np.mean(h)) if len(h) > 0 else None
+
+    return pred_color, ratios, mean_h
+
+def get_axis_sample_points_from_mask(
+    contour_mask,
+    center_uv,
+    axis_vec,
+    sample_frac=0.82
+):
+    """
+    contour 내부 픽셀들을 선택 축으로 투영해서
+    +방향 끝단 근처, -방향 끝단 근처 샘플 중심을 구한다.
+
+    단순히 length_px * 0.5를 쓰지 않고,
+    실제 contour_mask 내부 픽셀 분포를 기준으로 잡음.
+    """
+
+    mask = contour_mask > 0
+    ys, xs = np.nonzero(mask)
+
+    if len(xs) < 10:
+        return None
+
+    center = np.asarray(center_uv, dtype=np.float64)
+    axis = np.asarray(axis_vec, dtype=np.float64)
+
+    n = np.linalg.norm(axis)
+    if n < 1e-9:
+        return None
+
+    axis = axis / n
+
+    pts = np.stack([xs, ys], axis=1).astype(np.float64)
+    rel = pts - center[None, :]
+
+    proj = rel @ axis
+
+    pos = proj[proj > 0]
+    neg = -proj[proj < 0]
+
+    if len(pos) < 5 or len(neg) < 5:
+        return None
+
+    # max 대신 percentile을 써서 contour 튐/노이즈 영향 감소
+    pos_len = float(np.percentile(pos, 95))
+    neg_len = float(np.percentile(neg, 95))
+
+    plus_uv = center + axis * pos_len * sample_frac
+    minus_uv = center - axis * neg_len * sample_frac
+
+    return {
+        "plus_uv": plus_uv,
+        "minus_uv": minus_uv,
+        "axis_vec": axis,
+        "pos_len": pos_len,
+        "neg_len": neg_len,
+    }
+
+def sample_color_circle_hsv(
+    hsv_img,
+    contour_mask,
+    center_uv,
+    radius_px=8,
+    min_s=45,
+    min_v=35
+):
+    """
+    contour 내부에 있으면서,
+    지정 원 내부에 있는 픽셀만 HSV 샘플링.
+    S/V가 너무 낮은 픽셀은 회색/하이라이트/그림자 가능성이 커서 제외.
+    """
+
+    H, W = contour_mask.shape[:2]
+
+    cx, cy = center_uv
+    cx_i = int(round(cx))
+    cy_i = int(round(cy))
+
+    circle = np.zeros((H, W), dtype=np.uint8)
+    cv2.circle(circle, (cx_i, cy_i), int(radius_px), 255, -1)
+
+    sample_mask = (circle > 0) & (contour_mask > 0)
+
+    if np.count_nonzero(sample_mask) == 0:
+        return {
+            "pred_color": "unknown",
+            "ratios": {"red": 0.0, "yellow": 0.0, "green": 0.0, "blue": 0.0},
+            "mean_h": None,
+            "n_pixels": 0,
+            "sample_mask": sample_mask,
+        }
+
+    hsv_pixels_all = hsv_img[sample_mask]
+
+    # 저채도/저명도 제거
+    valid = (
+        (hsv_pixels_all[:, 1] >= int(min_s)) &
+        (hsv_pixels_all[:, 2] >= int(min_v))
+    )
+
+    hsv_pixels = hsv_pixels_all[valid]
+
+    pred_color, ratios, mean_h = classify_hsv_basic_colors(hsv_pixels)
+
+    return {
+        "pred_color": pred_color,
+        "ratios": ratios,
+        "mean_h": mean_h,
+        "n_pixels": int(len(hsv_pixels)),
+        "sample_mask": sample_mask,
+    }
+
+def apply_class_color_top_pose_to_contour_obj(
+    contour_obj,
+    color_img_rgb,
+    hsv_img,
+    class_id,
+    class_name,
+    class_color_pose_config,
+    verbose=False
+):
+    """
+    클래스별 color_axis / top_color 설정을 보고,
+    선택 축의 양 끝단 원형 영역 색을 비교해서 top 방향을 결정한다.
+
+    결과:
+        contour_obj["yaw_deg_pose"]를 top_color 방향 기준 yaw로 갱신.
+        contour_obj["color_top_*"] 디버그 정보 저장.
+
+    yaw 기준:
+        영상 y 음수 방향, 즉 화면 12시 방향 = 0도
+        시계방향 +
+        범위 -180 ~ +180
+    """
+
+    cfg = get_class_color_pose_cfg(
+        class_id=class_id,
+        class_name=class_name,
+        config=class_color_pose_config
+    )
+
+    if cfg is None:
+        return contour_obj
+
+    new_obj = dict(contour_obj)
+
+    contour_mask = new_obj.get("contour_mask", None)
+    center_uv = new_obj.get("center_uv", None)
+
+    if contour_mask is None or center_uv is None:
+        return new_obj
+
+    color_axis = str(cfg.get("color_axis", "major")).lower()
+    top_color = str(cfg.get("top_color", "green")).lower()
+
+    radius_px = int(cfg.get("radius_px", 8))
+    sample_frac = float(cfg.get("sample_frac", 0.82))
+    min_s = int(cfg.get("min_s", 45))
+    min_v = int(cfg.get("min_v", 35))
+
+    if color_axis == "major":
+        axis_vec = new_obj.get("major_axis_uv", None)
+    elif color_axis == "minor":
+        axis_vec = new_obj.get("minor_axis_uv", None)
+    else:
+        return new_obj
+
+    if axis_vec is None:
+        return new_obj
+
+    axis_vec = np.asarray(axis_vec, dtype=np.float64)
+
+    n = np.linalg.norm(axis_vec)
+    if n < 1e-9:
+        return new_obj
+
+    axis_vec = axis_vec / n
+
+    axis_points = get_axis_sample_points_from_mask(
+        contour_mask=contour_mask,
+        center_uv=center_uv,
+        axis_vec=axis_vec,
+        sample_frac=sample_frac
+    )
+
+    if axis_points is None:
+        return new_obj
+
+    plus_uv = axis_points["plus_uv"]
+    minus_uv = axis_points["minus_uv"]
+
+    plus_color = sample_color_circle_hsv(
+        hsv_img=hsv_img,
+        contour_mask=contour_mask,
+        center_uv=plus_uv,
+        radius_px=radius_px,
+        min_s=min_s,
+        min_v=min_v
+    )
+
+    minus_color = sample_color_circle_hsv(
+        hsv_img=hsv_img,
+        contour_mask=contour_mask,
+        center_uv=minus_uv,
+        radius_px=radius_px,
+        min_s=min_s,
+        min_v=min_v
+    )
+
+    plus_score = float(plus_color["ratios"].get(top_color, 0.0))
+    minus_score = float(minus_color["ratios"].get(top_color, 0.0))
+
+    # top_color가 더 많이 나온 쪽을 top 방향으로 선택
+    if plus_score >= minus_score:
+        top_side = "plus"
+        top_vec = axis_vec.copy()
+        top_uv = plus_uv
+        bottom_uv = minus_uv
+        top_score = plus_score
+    else:
+        top_side = "minus"
+        top_vec = -axis_vec.copy()
+        top_uv = minus_uv
+        bottom_uv = plus_uv
+        top_score = minus_score
+
+    # top 방향 yaw 계산
+    # x 오른쪽 +, y 아래쪽 +인 영상 좌표계에서
+    # 12시 방향, 즉 -y 방향을 0도로 둠.
+    yaw_from_12_cw = np.degrees(np.arctan2(
+        top_vec[0],
+        -top_vec[1]
+    ))
+
+    yaw_top_deg = normalize_yaw_deg_180(yaw_from_12_cw)
+
+    # 기존 pose 생성부가 yaw_deg_pose를 우선 사용하므로 여기에 최종 yaw 저장
+    new_obj["yaw_deg_pose"] = float(yaw_top_deg)
+
+    # 기존 angle_deg 필드와도 어느 정도 호환
+    new_obj["angle_deg"] = float(yaw_top_deg + 90.0)
+
+    # 선택한 축의 방향 벡터도 top 방향으로 부호 정리
+    if color_axis == "major":
+        new_obj["major_axis_uv"] = (
+            float(top_vec[0]),
+            float(top_vec[1])
+        )
+    else:
+        new_obj["minor_axis_uv"] = (
+            float(top_vec[0]),
+            float(top_vec[1])
+        )
+
+    prev_method = str(new_obj.get("pose_method", "pca"))
+    if "color_top" not in prev_method:
+        new_obj["pose_method"] = prev_method + "_color_top"
+
+    new_obj.update({
+        "color_axis": color_axis,
+        "top_color": top_color,
+        "top_side": top_side,
+
+        "color_top_yaw_deg": float(yaw_top_deg),
+        "color_top_vec_uv": (
+            float(top_vec[0]),
+            float(top_vec[1])
+        ),
+
+        "color_top_uv": (
+            float(top_uv[0]),
+            float(top_uv[1])
+        ),
+        "color_bottom_uv": (
+            float(bottom_uv[0]),
+            float(bottom_uv[1])
+        ),
+
+        "color_plus_uv": (
+            float(plus_uv[0]),
+            float(plus_uv[1])
+        ),
+        "color_minus_uv": (
+            float(minus_uv[0]),
+            float(minus_uv[1])
+        ),
+
+        "color_plus_pred": plus_color["pred_color"],
+        "color_minus_pred": minus_color["pred_color"],
+        "color_plus_ratios": plus_color["ratios"],
+        "color_minus_ratios": minus_color["ratios"],
+        "color_plus_mean_h": plus_color["mean_h"],
+        "color_minus_mean_h": minus_color["mean_h"],
+        "color_plus_n_pixels": plus_color["n_pixels"],
+        "color_minus_n_pixels": minus_color["n_pixels"],
+
+        "color_top_score": float(top_score),
+        "color_top_score_diff": float(abs(plus_score - minus_score)),
+    })
+
+    if verbose:
+        print(
+            f"[COLOR_TOP] class={class_name} id={class_id} | "
+            f"axis={color_axis} | target={top_color} | "
+            f"+={plus_color['pred_color']} {plus_color['ratios']} | "
+            f"-={minus_color['pred_color']} {minus_color['ratios']} | "
+            f"top={top_side} | yaw={yaw_top_deg:.2f}"
+        )
+
+    return new_obj
+
+def rotate_vec_image_cw(v, deg):
+    """
+    영상 좌표계 기준 회전.
+    x: 오른쪽 +
+    y: 아래쪽 +
+
+    deg > 0 이면 화면에서 시계방향 회전.
+    예:
+        위쪽 벡터 (0, -1)에 +45도 적용
+        -> 오른쪽 위 방향 (0.707, -0.707)
+    """
+    v = np.asarray(v, dtype=np.float64)
+
+    theta = np.deg2rad(deg)
+    c = np.cos(theta)
+    s = np.sin(theta)
+
+    x, y = v
+
+    rotated = np.array([
+        c * x - s * y,
+        s * x + c * y
+    ], dtype=np.float64)
+
+    n = np.linalg.norm(rotated)
+    if n < 1e-9:
+        return v
+
+    return rotated / n
+
+def get_largest_contour_from_mask(mask, min_area=80):
+    """
+    binary mask에서 가장 큰 contour 하나 추출
+    """
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+
+    contours, _ = cv2.findContours(
+        mask_u8,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+
+    if len(contours) == 0:
+        return None
+
+    return max(contours, key=cv2.contourArea)
+
+def apply_minarea_pose_to_contour_obj(
+    contour_obj,
+    xyz_map,
+    valid_mask,
+    min_contour_area=80,
+    yaw_zero_axis="up",
+    axis_offset_deg=45.0
+):
+    """
+    기존 PCA contour_obj를 유지하되,
+    center_uv / angle_deg / yaw_deg_pose / minAreaBox 정보를
+    minAreaRect 기준으로 덮어쓴다.
+
+    반환 contour_obj는 기존 pose_table 생성부와 호환된다.
+
+    yaw 기준:
+        yaw_zero_axis="up"이면
+        영상 좌표계에서 위쪽, 즉 y 음수 방향을 0도로 본다.
+        오른쪽으로 기울면 +, 왼쪽으로 기울면 -.
+        최종 범위는 -90 ~ +90.
+    """
+
+    new_obj = dict(contour_obj)
+
+    contour_mask = new_obj.get("contour_mask", None)
+
+    if contour_mask is None:
+        return new_obj
+
+    contour = new_obj.get("contour", None)
+
+    if contour is None:
+        contour = get_largest_contour_from_mask(
+            contour_mask,
+            min_area=min_contour_area
+        )
+
+    if contour is None:
+        return new_obj
+
+    area_px = float(cv2.contourArea(contour))
+
+    rect = cv2.minAreaRect(contour)
+    (cx, cy), (rw, rh), rect_angle = rect
+
+    box = cv2.boxPoints(rect).astype(np.float32)
+
+    # ------------------------------------------------------------
+    # minAreaBox의 4개 edge 중 긴 변을 major axis로 선택
+    # ------------------------------------------------------------
+    edges = []
+
+    for i in range(4):
+        p0 = box[i]
+        p1 = box[(i + 1) % 4]
+        v = p1 - p0
+        length = float(np.linalg.norm(v))
+
+        if length < 1e-6:
+            continue
+
+        edges.append({
+            "p0": p0,
+            "p1": p1,
+            "v": v / length,
+            "length": length
+        })
+
+    if len(edges) < 2:
+        return new_obj
+
+    major_edge = max(edges, key=lambda e: e["length"])
+    minor_edge = min(edges, key=lambda e: e["length"])
+
+    major_vec = major_edge["v"].astype(np.float64)
+    minor_vec = minor_edge["v"].astype(np.float64)
+
+    major_len_px = float(major_edge["length"])
+    minor_len_px = float(minor_edge["length"])
+
+    # 방향 부호 고정
+    # major axis가 되도록이면 영상 위쪽을 향하도록 맞춤.
+    # 180도 대칭으로 쓸 거면 부호는 큰 의미 없지만, 디버깅 안정성을 위해 고정.
+    if major_vec[1] > 0:
+        major_vec = -major_vec
+
+    if minor_vec[1] > 0:
+        minor_vec = -minor_vec
+
+    # ------------------------------------------------------------
+    # [NEW] minAreaBox 장축/단축을 둘 다 +45도 회전
+    # 영상 좌표계 기준 deg > 0: 화면에서 시계방향
+    # ------------------------------------------------------------
+    major_vec_raw = major_vec.copy()
+    minor_vec_raw = minor_vec.copy()
+
+    major_vec = rotate_vec_image_cw(major_vec, axis_offset_deg)
+    minor_vec = rotate_vec_image_cw(minor_vec, axis_offset_deg)
+
+    center_uv = np.array([cx, cy], dtype=np.float64)
+
+    major_p1 = center_uv - major_vec * major_len_px * 0.5
+    major_p2 = center_uv + major_vec * major_len_px * 0.5
+
+    minor_p1 = center_uv - minor_vec * minor_len_px * 0.5
+    minor_p2 = center_uv + minor_vec * minor_len_px * 0.5
+
+    # ------------------------------------------------------------
+    # yaw 계산
+    # 영상 좌표계:
+    #   x 오른쪽 +
+    #   y 아래쪽 +
+    #
+    # 여기서는 y 음수 방향, 즉 12시 방향을 yaw 0도로 둔다.
+    # 오른쪽으로 기울면 +, 왼쪽으로 기울면 -.
+    # ------------------------------------------------------------
+    if yaw_zero_axis == "up":
+        yaw_from_12_cw = np.degrees(np.arctan2(
+            major_vec[0],
+            -major_vec[1]
+        ))
+        yaw_deg_pose = normalize_yaw_deg_90(yaw_from_12_cw)
+    else:
+        # 일반적인 image x축 기준 각도
+        yaw_img_x = np.degrees(np.arctan2(
+            major_vec[1],
+            major_vec[0]
+        ))
+        yaw_deg_pose = normalize_yaw_deg_90(yaw_img_x)
+
+    # 기존 코드의 angle_deg -> yaw 변환식과 호환시키기 위한 값
+    # 기존:
+    # yaw_deg = (angle_deg + 180) % 180 - 90
+    #
+    # 원하는 yaw_deg_pose가 나오려면 angle_deg = yaw_deg_pose + 90
+    angle_deg_legacy = float(yaw_deg_pose + 90.0)
+
+    # ------------------------------------------------------------
+    # center_xyz는 가능하면 contour mask 내부 valid depth median으로 재계산
+    # minAreaRect center의 단일 depth를 쓰는 것보다 안정적임.
+    # ------------------------------------------------------------
+    valid_obj_mask = (contour_mask > 0) & valid_mask
+
+    if np.count_nonzero(valid_obj_mask) > 0:
+        pts_xyz = xyz_map[valid_obj_mask]
+        center_xyz = np.median(pts_xyz, axis=0)
+    else:
+        center_xyz = new_obj.get("center_xyz", None)
+
+    new_obj.update({
+        "pose_method": "minarea_box",
+
+        "contour": contour,
+        "contour_mask": contour_mask,
+        "area_px": area_px,
+
+        "min_rect": rect,
+        "min_box_uv": box,
+
+        "center_uv": (float(cx), float(cy)),
+        "center_xyz": center_xyz,
+
+        "angle_deg": angle_deg_legacy,
+        "yaw_deg_pose": float(yaw_deg_pose),
+
+        # 중요:
+        # visualize_contour_pca_axes()는 endpoint가 아니라
+        # unit direction vector를 기대함.
+        "major_axis_uv": (
+            float(major_vec[0]),
+            float(major_vec[1])
+        ),
+        "minor_axis_uv": (
+            float(minor_vec[0]),
+            float(minor_vec[1])
+        ),
+
+        # endpoint가 필요하면 별도 key로 저장
+        "major_axis_endpoints_uv": (
+            (float(major_p1[0]), float(major_p1[1])),
+            (float(major_p2[0]), float(major_p2[1]))
+        ),
+        "minor_axis_endpoints_uv": (
+            (float(minor_p1[0]), float(minor_p1[1])),
+            (float(minor_p2[0]), float(minor_p2[1]))
+        ),
+
+        "major_length_px": major_len_px,
+        "minor_length_px": minor_len_px,
+
+        "minarea_center_uv": (float(cx), float(cy)),
+        "minarea_major_vec_uv": (
+            float(major_vec[0]),
+            float(major_vec[1])
+        ),
+        "minarea_minor_vec_uv": (
+            float(minor_vec[0]),
+            float(minor_vec[1])
+        ),
+        "minarea_yaw_deg": float(yaw_deg_pose),
+    })
+
+    return new_obj
+
+def _unit_vec2(v):
+    v = np.asarray(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-9:
+        return None
+    return v / n
+
+def _yaw_from_vec_12cw(v):
+    """
+    영상 좌표계 기준:
+        x 오른쪽 +
+        y 아래쪽 +
+    12시 방향(-y)을 0도로 보고, 시계방향 +.
+    """
+    v = _unit_vec2(v)
+    if v is None:
+        return None
+
+    yaw = np.degrees(np.arctan2(v[0], -v[1]))
+    return normalize_yaw_deg_180(yaw)
+
+def evaluate_axis_end_color(
+    contour_obj,
+    hsv_img,
+    axis_vec,
+    target_color="green",
+    radius_px=8,
+    sample_frac=0.82,
+    min_s=45,
+    min_v=35
+):
+    """
+    특정 축의 +끝단, -끝단 원형 영역 색을 보고
+    target_color가 양쪽에 얼마나 있는지 평가한다.
+
+    both_score = min(+끝단 target 비율, -끝단 target 비율)
+    즉 양끝이 모두 초록이면 높게 나옴.
+    """
+
+    contour_mask = contour_obj.get("contour_mask", None)
+    center_uv = contour_obj.get("center_uv", None)
+
+    if contour_mask is None or center_uv is None:
+        return None
+
+    axis_vec = _unit_vec2(axis_vec)
+    if axis_vec is None:
+        return None
+
+    axis_points = get_axis_sample_points_from_mask(
+        contour_mask=contour_mask,
+        center_uv=center_uv,
+        axis_vec=axis_vec,
+        sample_frac=sample_frac
+    )
+
+    if axis_points is None:
+        return None
+
+    plus_uv = axis_points["plus_uv"]
+    minus_uv = axis_points["minus_uv"]
+
+    plus_color = sample_color_circle_hsv(
+        hsv_img=hsv_img,
+        contour_mask=contour_mask,
+        center_uv=plus_uv,
+        radius_px=radius_px,
+        min_s=min_s,
+        min_v=min_v
+    )
+
+    minus_color = sample_color_circle_hsv(
+        hsv_img=hsv_img,
+        contour_mask=contour_mask,
+        center_uv=minus_uv,
+        radius_px=radius_px,
+        min_s=min_s,
+        min_v=min_v
+    )
+
+    plus_score = float(plus_color["ratios"].get(target_color, 0.0))
+    minus_score = float(minus_color["ratios"].get(target_color, 0.0))
+
+    return {
+        "axis_vec": axis_vec,
+        "plus_uv": plus_uv,
+        "minus_uv": minus_uv,
+        "plus_color": plus_color,
+        "minus_color": minus_color,
+        "plus_score": plus_score,
+        "minus_score": minus_score,
+        "both_score": float(min(plus_score, minus_score)),
+        "sum_score": float(plus_score + minus_score),
+    }
+
+def apply_smalltree_green_axis_as_minor(
+    contour_obj,
+    hsv_img,
+    target_color="green",
+    radius_px=8,
+    sample_frac=0.82,
+    min_s=45,
+    min_v=35,
+    both_min_ratio=0.35,
+    verbose=True
+):
+    """
+    SmallTree 전용.
+
+    minAreaBox + 45도 이후 생긴 두 축 후보:
+        major_axis_uv
+        minor_axis_uv
+
+    두 축의 양 끝단을 검사해서,
+    양 끝이 target_color인 축을 논리적 minor_axis_uv로 강제한다.
+
+    즉:
+        초록-초록 축 = minor_axis_uv
+        나머지 축 = major_axis_uv
+
+    이후 apply_class_color_top_pose_to_contour_obj()가
+    major축에서 top_color 방향을 다시 잡게 된다.
+    """
+
+    new_obj = dict(contour_obj)
+
+    major_vec = new_obj.get("major_axis_uv", None)
+    minor_vec = new_obj.get("minor_axis_uv", None)
+
+    if major_vec is None or minor_vec is None:
+        return new_obj
+
+    major_vec = _unit_vec2(major_vec)
+    minor_vec = _unit_vec2(minor_vec)
+
+    if major_vec is None or minor_vec is None:
+        return new_obj
+
+    cfg_major = evaluate_axis_end_color(
+        contour_obj=new_obj,
+        hsv_img=hsv_img,
+        axis_vec=major_vec,
+        target_color=target_color,
+        radius_px=radius_px,
+        sample_frac=sample_frac,
+        min_s=min_s,
+        min_v=min_v
+    )
+
+    cfg_minor = evaluate_axis_end_color(
+        contour_obj=new_obj,
+        hsv_img=hsv_img,
+        axis_vec=minor_vec,
+        target_color=target_color,
+        radius_px=radius_px,
+        sample_frac=sample_frac,
+        min_s=min_s,
+        min_v=min_v
+    )
+
+    if cfg_major is None or cfg_minor is None:
+        return new_obj
+
+    major_both = cfg_major["both_score"]
+    minor_both = cfg_minor["both_score"]
+
+    # 양 끝이 더 초록색인 축을 green_axis로 선택
+    if major_both >= minor_both:
+        green_axis_name = "major"
+        green_axis_vec = major_vec
+        other_axis_vec = minor_vec
+        green_cfg = cfg_major
+        other_cfg = cfg_minor
+    else:
+        green_axis_name = "minor"
+        green_axis_vec = minor_vec
+        other_axis_vec = major_vec
+        green_cfg = cfg_minor
+        other_cfg = cfg_major
+
+    # 너무 애매하면 축 교정하지 않음
+    if green_cfg["both_score"] < both_min_ratio:
+        if verbose:
+            print(
+                f"[SMALLTREE_AXIS] green axis not reliable | "
+                f"major_both={major_both:.2f}, minor_both={minor_both:.2f}, "
+                f"threshold={both_min_ratio:.2f}"
+            )
+        return new_obj
+
+    # 핵심:
+    # 초록-초록 축을 minor로 강제
+    new_major_vec = other_axis_vec
+    new_minor_vec = green_axis_vec
+
+    # major 방향은 아직 top/bottom 확정 전.
+    # 바로 뒤의 color_top 함수가 major축의 + / - 중 green top을 다시 선택함.
+    yaw_pre = _yaw_from_vec_12cw(new_major_vec)
+
+    if yaw_pre is not None:
+        new_obj["yaw_deg_pose"] = float(yaw_pre)
+        new_obj["angle_deg"] = float(yaw_pre + 90.0)
+
+    # 기존 minarea 값 보존
+    new_obj["smalltree_before_green_major_axis_uv"] = tuple(map(float, major_vec))
+    new_obj["smalltree_before_green_minor_axis_uv"] = tuple(map(float, minor_vec))
+
+    # 논리 축으로 덮어쓰기
+    new_obj["major_axis_uv"] = (
+        float(new_major_vec[0]),
+        float(new_major_vec[1])
+    )
+    new_obj["minor_axis_uv"] = (
+        float(new_minor_vec[0]),
+        float(new_minor_vec[1])
+    )
+
+    # pose dict에서 쓰는 minarea 축도 같이 논리축으로 맞춤
+    new_obj["minarea_major_vec_uv"] = (
+        float(new_major_vec[0]),
+        float(new_major_vec[1])
+    )
+    new_obj["minarea_minor_vec_uv"] = (
+        float(new_minor_vec[0]),
+        float(new_minor_vec[1])
+    )
+
+    # endpoint도 다시 저장
+    contour_mask = new_obj.get("contour_mask", None)
+    center_uv = new_obj.get("center_uv", None)
+
+    if contour_mask is not None and center_uv is not None:
+        major_ep = get_axis_sample_points_from_mask(
+            contour_mask=contour_mask,
+            center_uv=center_uv,
+            axis_vec=new_major_vec,
+            sample_frac=1.0
+        )
+
+        minor_ep = get_axis_sample_points_from_mask(
+            contour_mask=contour_mask,
+            center_uv=center_uv,
+            axis_vec=new_minor_vec,
+            sample_frac=1.0
+        )
+
+        if major_ep is not None:
+            new_obj["major_axis_endpoints_uv"] = (
+                (float(major_ep["minus_uv"][0]), float(major_ep["minus_uv"][1])),
+                (float(major_ep["plus_uv"][0]), float(major_ep["plus_uv"][1]))
+            )
+
+        if minor_ep is not None:
+            new_obj["minor_axis_endpoints_uv"] = (
+                (float(minor_ep["minus_uv"][0]), float(minor_ep["minus_uv"][1])),
+                (float(minor_ep["plus_uv"][0]), float(minor_ep["plus_uv"][1]))
+            )
+
+    # 디버그 정보 저장
+    new_obj.update({
+        "smalltree_axis_rule": "green_axis_as_minor",
+        "smalltree_green_axis_original": green_axis_name,
+        "smalltree_axis_swapped_90": bool(green_axis_name == "major"),
+
+        "smalltree_major_green_plus": float(cfg_major["plus_score"]),
+        "smalltree_major_green_minus": float(cfg_major["minus_score"]),
+        "smalltree_major_green_both": float(cfg_major["both_score"]),
+
+        "smalltree_minor_green_plus": float(cfg_minor["plus_score"]),
+        "smalltree_minor_green_minus": float(cfg_minor["minus_score"]),
+        "smalltree_minor_green_both": float(cfg_minor["both_score"]),
+
+        "smalltree_green_axis_plus_pred": green_cfg["plus_color"]["pred_color"],
+        "smalltree_green_axis_minus_pred": green_cfg["minus_color"]["pred_color"],
+        "smalltree_other_axis_plus_pred": other_cfg["plus_color"]["pred_color"],
+        "smalltree_other_axis_minus_pred": other_cfg["minus_color"]["pred_color"],
+    })
+
+    prev_method = str(new_obj.get("pose_method", "pca"))
+    if "smalltree_green_minor" not in prev_method:
+        new_obj["pose_method"] = prev_method + "_smalltree_green_minor"
+
+    if verbose:
+        print(
+            f"[SMALLTREE_AXIS] "
+            f"major green +={cfg_major['plus_score']:.2f}, -={cfg_major['minus_score']:.2f}, both={cfg_major['both_score']:.2f} | "
+            f"minor green +={cfg_minor['plus_score']:.2f}, -={cfg_minor['minus_score']:.2f}, both={cfg_minor['both_score']:.2f} | "
+            f"green_axis={green_axis_name} -> minor | "
+            f"swapped_90={green_axis_name == 'major'}"
+        )
+
+    return new_obj
+
+def _draw_text_with_bg(
+    img,
+    text,
+    org,
+    font_scale=0.5,
+    text_color=(255, 255, 255),
+    bg_color=(0, 0, 0),
+    thickness=1
+):
+    x, y = int(org[0]), int(org[1])
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    pad = 3
+
+    x1 = x
+    y1 = y - th - pad
+    x2 = x + tw + 2 * pad
+    y2 = y + baseline + pad
+
+    H, W = img.shape[:2]
+    x1 = max(0, min(W - 1, x1))
+    y1 = max(0, min(H - 1, y1))
+    x2 = max(0, min(W - 1, x2))
+    y2 = max(0, min(H - 1, y2))
+
+    # cv2.rectangle(img, (x1, y1), (x2, y2), bg_color, -1)
+    cv2.putText(
+        img,
+        text,
+        (x + pad, y),
+        font,
+        font_scale,
+        text_color,
+        thickness,
+        cv2.LINE_AA
+    )
+
+def _draw_angle_arc_12cw(
+    img,
+    center_uv,
+    yaw_deg,
+    radius=25,
+    color=(255, 255, 0),
+    thickness=2
+):
+    """
+    기준:
+      0도 = 12시 방향(영상 -Y)
+      시계방향 +
+    """
+    cx, cy = float(center_uv[0]), float(center_uv[1])
+
+    pts = []
+    n_steps = 40
+
+    for t in np.linspace(0.0, float(yaw_deg), n_steps):
+        rad = np.deg2rad(t)
+        x = cx + radius * np.sin(rad)
+        y = cy - radius * np.cos(rad)
+        pts.append([int(round(x)), int(round(y))])
+
+    pts = np.asarray(pts, dtype=np.int32)
+    if len(pts) >= 2:
+        cv2.polylines(img, [pts], False, color, thickness, cv2.LINE_AA)
+
+        # arc 끝에 작은 화살표
+        p_prev = pts[-2]
+        p_end = pts[-1]
+        cv2.arrowedLine(
+            img,
+            tuple(p_prev),
+            tuple(p_end),
+            color,
+            thickness,
+            tipLength=0.4
+        )
+
+def visualize_final_top_direction(
+    color_img_rgb,
+    contour_objects,
+    draw_contour=True,
+    draw_min_rect=True,
+    draw_ref_axis=True,
+    ref_len=45,
+    final_len_fallback=45,
+    show_arc=True
+):
+    """
+    각 contour_obj에 대해:
+      - 무게중심(center_uv)
+      - 최종 top color 위치(color_top_uv)
+      - center -> top_color 위치 화살표
+      - yaw 각도 텍스트
+      - 0도 기준축(12시 방향, -Y)
+      - 시계방향 + 방향 설명
+    을 시각화한다.
+    """
+
+    vis = color_img_rgb.copy()
+    if vis.dtype != np.uint8:
+        vis = np.clip(vis, 0, 255).astype(np.uint8)
+
+    for obj in contour_objects:
+        contour = obj.get("contour", None)
+        box = obj.get("min_box_uv", None)
+
+        center_uv = obj.get("center_uv", None)
+        top_uv = obj.get("color_top_uv", None)
+        yaw_deg = obj.get("yaw_deg_pose", None)
+
+        class_name = obj.get("yolo_class_name", obj.get("class_name", "obj"))
+        top_color = obj.get("top_color", None)
+        pose_method = obj.get("pose_method", "unknown")
+
+        if center_uv is None:
+            continue
+
+        cx, cy = float(center_uv[0]), float(center_uv[1])
+        center_pt = (int(round(cx)), int(round(cy)))
+
+        # ---------------------------
+        # contour / minArea box
+        # ---------------------------
+        if draw_contour and contour is not None:
+            cv2.drawContours(vis, [contour], -1, (255, 255, 0), 2)  # yellow
+
+        if draw_min_rect and box is not None:
+            box_i = np.int32(np.round(box))
+            cv2.polylines(vis, [box_i], True, (255, 0, 255), 2)  # magenta
+
+        # ---------------------------
+        # 중심점
+        # ---------------------------
+        cv2.circle(vis, center_pt, 5, (255, 0, 0), -1)   # red center
+        cv2.circle(vis, center_pt, 8, (255, 255, 255), 1)
+
+        # ---------------------------
+        # 0도 기준축: 12시 방향(-Y)
+        # ---------------------------
+        if draw_ref_axis:
+            ref_end = (center_pt[0], center_pt[1] - int(ref_len))
+            cv2.arrowedLine(
+                vis,
+                center_pt,
+                ref_end,
+                (255, 255, 255),   # white
+                2,
+                tipLength=0.18
+            )
+            _draw_text_with_bg(
+                vis,
+                "0 deg ref (-Y, 12 o'clock)",
+                (center_pt[0] + 10, center_pt[1] - ref_len - 8),
+                font_scale=0.45,
+                text_color=(255, 255, 255),
+                bg_color=(0, 0, 0),
+                thickness=1
+            )
+
+            _draw_text_with_bg(
+                vis,
+                "CW +",
+                (center_pt[0] + 12, center_pt[1] + 18),
+                font_scale=0.45,
+                text_color=(255, 255, 255),
+                bg_color=(0, 0, 0),
+                thickness=1
+            )
+
+        # ---------------------------
+        # 최종 top 방향
+        # ---------------------------
+        if top_uv is not None:
+            tx, ty = float(top_uv[0]), float(top_uv[1])
+            top_pt = (int(round(tx)), int(round(ty)))
+        else:
+            top_vec = obj.get("color_top_vec_uv", None)
+            if top_vec is not None:
+                top_vec = np.asarray(top_vec, dtype=np.float64)
+                n = np.linalg.norm(top_vec)
+                if n > 1e-9:
+                    top_vec = top_vec / n
+                    tx = cx + top_vec[0] * final_len_fallback
+                    ty = cy + top_vec[1] * final_len_fallback
+                    top_pt = (int(round(tx)), int(round(ty)))
+                else:
+                    top_pt = None
+            else:
+                top_pt = None
+
+        if top_pt is not None:
+            # 최종 방향 화살표
+            cv2.arrowedLine(
+                vis,
+                center_pt,
+                top_pt,
+                (0, 255, 0),   # green
+                3,
+                tipLength=0.2
+            )
+
+            cv2.circle(vis, top_pt, 6, (0, 255, 0), -1)
+            cv2.circle(vis, top_pt, 10, (255, 255, 255), 1)
+
+            label = f"top color: {top_color}"
+            _draw_text_with_bg(
+                vis,
+                label,
+                (top_pt[0] + 8, top_pt[1] - 8),
+                font_scale=0.45,
+                text_color=(0, 255, 0),
+                bg_color=(0, 0, 0),
+                thickness=1
+            )
+
+        # ---------------------------
+        # 각도 arc
+        # ---------------------------
+        if yaw_deg is not None and show_arc:
+            _draw_angle_arc_12cw(
+                vis,
+                center_uv=center_uv,
+                yaw_deg=float(yaw_deg),
+                radius=26,
+                color=(0, 255, 255),   # cyan
+                thickness=2
+            )
+
+        # ---------------------------
+        # 각도 텍스트
+        # ---------------------------
+        angle_text = f"{class_name} | yaw={float(yaw_deg):.1f} deg" if yaw_deg is not None else f"{class_name}"
+        sub_text = f"method={pose_method}"
+
+        _draw_text_with_bg(
+            vis,
+            angle_text,
+            (center_pt[0] + 10, center_pt[1] - 12),
+            font_scale=0.5,
+            text_color=(255, 255, 255),
+            bg_color=(0, 0, 0),
+            thickness=1
+        )
+
+        _draw_text_with_bg(
+            vis,
+            sub_text,
+            (center_pt[0] + 10, center_pt[1] + 8),
+            font_scale=0.42,
+            text_color=(220, 220, 220),
+            bg_color=(0, 0, 0),
+            thickness=1
+        )
+
+    return vis
+
 
 
 ################################### 실행 함수
@@ -5407,7 +6716,16 @@ def search_assembly(
     min_contour_area=80,
 
     # depth 검사
-    min_valid_depth_points=30
+    min_valid_depth_points=30,
+
+    # SmallTree 특수 처리
+    smalltree_class_id=5,
+    use_smalltree_minarea=True,
+
+    # 클래스별 색상 top 방향 보정
+    use_class_color_top=True,
+    class_color_pose_config=None,
+    color_top_verbose=True
 ):
     """
     YOLOv8-seg 클래스 이름 기반 search_assembly.
@@ -5445,12 +6763,17 @@ def search_assembly(
     if yolo_model is None and yolo_dir is None:
         raise ValueError("yolo_model 또는 yolo_dir 중 하나는 반드시 입력해야 합니다.")
 
+    if class_color_pose_config is None:
+        class_color_pose_config = CLASS_COLOR_POSE_CONFIG
+
     # ------------------------------------------------------------
     # 0. 이미지 정리
     # ------------------------------------------------------------
     color_img_rgb = color_rgb.copy()
     if color_img_rgb.dtype != np.uint8:
         color_img_rgb = np.clip(color_img_rgb, 0, 255).astype(np.uint8)
+
+    hsv_img = cv2.cvtColor(color_img_rgb, cv2.COLOR_RGB2HSV)
 
     depth_img = depth.copy()
     depth_scale = scale
@@ -5500,7 +6823,7 @@ def search_assembly(
     # ------------------------------------------------------------
     # 3. depth -> xyz_map 생성
     # ------------------------------------------------------------
-    xyz_map, valid_mask = depth_to_xyz_map(
+    xyz_map, valid_mask = ivl.depth_to_xyz_map(
         depth_img=depth_img,
         depth_scale=depth_scale,
         intrinsics=intrinsics
@@ -5544,7 +6867,7 @@ def search_assembly(
         combined_mask = cv2.bitwise_or(combined_mask, instance_mask)
 
         # 이 YOLO instance mask 안에서 contour PCA 수행
-        contour_objects = extract_contour_pca_from_mask(
+        contour_objects = ivl.extract_contour_pca_from_mask(
             object_mask=instance_mask,
             xyz_map=xyz_map,
             valid_mask=valid_mask,
@@ -5552,6 +6875,57 @@ def search_assembly(
         )
 
         for contour_obj in contour_objects:
+
+            if use_smalltree_minarea and class_id == smalltree_class_id:
+                contour_obj = apply_minarea_pose_to_contour_obj(
+                    contour_obj=contour_obj,
+                    xyz_map=xyz_map,
+                    valid_mask=valid_mask,
+                    min_contour_area=min_contour_area,
+                    yaw_zero_axis="up"
+                )
+
+                # ------------------------------------------------------------
+                # [NEW] SmallTree 전용:
+                # minAreaBox + 45도 이후 두 축 후보 중
+                # 양 끝이 green인 축을 minor_axis_uv로 강제한다.
+                # ------------------------------------------------------------
+                small_cfg = get_class_color_pose_cfg(
+                    class_id=class_id,
+                    class_name=yolo_class_name,
+                    config=class_color_pose_config
+                )
+
+                if small_cfg is None:
+                    small_cfg = {}
+
+                contour_obj = apply_smalltree_green_axis_as_minor(
+                    contour_obj=contour_obj,
+                    hsv_img=hsv_img,
+                    target_color=small_cfg.get("top_color", "green"),
+                    radius_px=small_cfg.get("radius_px", 8),
+                    sample_frac=small_cfg.get("sample_frac", 0.82),
+                    min_s=small_cfg.get("min_s", 45),
+                    min_v=small_cfg.get("min_v", 35),
+                    both_min_ratio=small_cfg.get("both_min_ratio", 0.35),
+                    verbose=color_top_verbose
+                )
+
+            # ------------------------------------------------------------
+            # [NEW] 클래스별 color_axis / top_color 기반 방향 보정
+            # pose_table로 넘어가기 전에 yaw_deg_pose를 갱신한다.
+            # ------------------------------------------------------------
+            if use_class_color_top:
+                contour_obj = apply_class_color_top_pose_to_contour_obj(
+                    contour_obj=contour_obj,
+                    color_img_rgb=color_img_rgb,
+                    hsv_img=hsv_img,
+                    class_id=class_id,
+                    class_name=yolo_class_name,
+                    class_color_pose_config=class_color_pose_config,
+                    verbose=color_top_verbose
+                )
+
             contour_mask = contour_obj.get("contour_mask", None)
 
             if contour_mask is None:
@@ -5584,7 +6958,12 @@ def search_assembly(
             center_xyz_m = np.asarray(contour_obj["center_xyz"], dtype=np.float64)
             center_xyz_mm = center_xyz_m * 1000.0
 
-            yaw_deg = (float(contour_obj.get("angle_deg", 0.0)) + 180.0) % 180.0 - 90.0
+            if "yaw_deg_pose" in contour_obj:
+                yaw_deg = float(contour_obj["yaw_deg_pose"])
+            else:
+                yaw_deg = (
+                    float(contour_obj.get("angle_deg", 0.0)) + 180.0
+                ) % 180.0 - 90.0
 
             pose = {
                 # 핵심: 여기 class_name이 YOLO 클래스 이름이 됨
@@ -5608,13 +6987,50 @@ def search_assembly(
                 "center_xyz": center_xyz_m,
                 "center_uv": contour_obj.get("center_uv", None),
 
+                "pose_method": contour_obj.get("pose_method", "pca"),
+
+                "min_rect": contour_obj.get("min_rect", None),
+                "min_box_uv": contour_obj.get("min_box_uv", None),
+                "minarea_center_uv": contour_obj.get("minarea_center_uv", None),
+                "minarea_major_vec_uv": contour_obj.get("minarea_major_vec_uv", None),
+                "minarea_minor_vec_uv": contour_obj.get("minarea_minor_vec_uv", None),
+                "minarea_yaw_deg": contour_obj.get("minarea_yaw_deg", None),
+
                 "major_axis_uv": contour_obj.get("major_axis_uv", None),
                 "minor_axis_uv": contour_obj.get("minor_axis_uv", None),
                 "angle_deg": contour_obj.get("angle_deg", None),
 
+                "color_axis": contour_obj.get("color_axis", None),
+                "top_color": contour_obj.get("top_color", None),
+                "top_side": contour_obj.get("top_side", None),
+
+                "color_top_yaw_deg": contour_obj.get("color_top_yaw_deg", None),
+                "color_top_vec_uv": contour_obj.get("color_top_vec_uv", None),
+                "color_top_uv": contour_obj.get("color_top_uv", None),
+                "color_bottom_uv": contour_obj.get("color_bottom_uv", None),
+
+                "color_plus_pred": contour_obj.get("color_plus_pred", None),
+                "color_minus_pred": contour_obj.get("color_minus_pred", None),
+                "color_plus_ratios": contour_obj.get("color_plus_ratios", None),
+                "color_minus_ratios": contour_obj.get("color_minus_ratios", None),
+                "color_top_score": contour_obj.get("color_top_score", None),
+                "color_top_score_diff": contour_obj.get("color_top_score_diff", None),
+
                 "major_axis_xyz": contour_obj.get("major_axis_xyz", None),
                 "middle_axis_xyz": contour_obj.get("middle_axis_xyz", None),
                 "minor_axis_xyz": contour_obj.get("minor_axis_xyz", None),
+
+                "smalltree_axis_rule": contour_obj.get("smalltree_axis_rule", None),
+                "smalltree_green_axis_original": contour_obj.get("smalltree_green_axis_original", None),
+                "smalltree_axis_swapped_90": contour_obj.get("smalltree_axis_swapped_90", None),
+
+                "smalltree_major_green_plus": contour_obj.get("smalltree_major_green_plus", None),
+                "smalltree_major_green_minus": contour_obj.get("smalltree_major_green_minus", None),
+                "smalltree_major_green_both": contour_obj.get("smalltree_major_green_both", None),
+
+                "smalltree_minor_green_plus": contour_obj.get("smalltree_minor_green_plus", None),
+                "smalltree_minor_green_minus": contour_obj.get("smalltree_minor_green_minus", None),
+                "smalltree_minor_green_both": contour_obj.get("smalltree_minor_green_both", None),
 
                 "major_length_mm": float(contour_obj.get("major_length_m", 0.0) * 1000.0)
                     if "major_length_m" in contour_obj else None,
@@ -5680,7 +7096,7 @@ def search_assembly(
         plt.show()
 
         if len(all_contour_objects_for_vis) > 0:
-            vis_contour_pca = visualize_contour_pca_axes(
+            vis_contour_pca = ivl.visualize_contour_pca_axes(
                 color_img_rgb=color_img_rgb,
                 object_mask=combined_mask,
                 contour_objects=all_contour_objects_for_vis,
@@ -5694,6 +7110,24 @@ def search_assembly(
             plt.figure(figsize=(8, 6))
             plt.imshow(vis_contour_pca)
             plt.title("YOLO Class Mask Contour PCA")
+
+            # ------------------------------------------------------------
+            # [NEW] 최종 top color 방향 / 기준축 / 각도 시각화
+            # ------------------------------------------------------------
+            vis_final_top = visualize_final_top_direction(
+                color_img_rgb=color_img_rgb,
+                contour_objects=all_contour_objects_for_vis,
+                draw_contour=True,
+                draw_min_rect=True,
+                draw_ref_axis=True,
+                ref_len=45,
+                final_len_fallback=45,
+                show_arc=True
+            )
+
+            plt.figure(figsize=(10, 8))
+            plt.imshow(vis_final_top)
+            plt.title("Final Top-Color Direction Debug")
             plt.axis("off")
             plt.show()
 
@@ -5706,10 +7140,13 @@ def search_assembly(
             f"global {pose['global_idx']:02d} | "
             f"local {pose['local_id']:02d} | "
             f"{pose['class_name']:16s} | "
+            f"method={pose.get('pose_method', 'pca'):18s} | "
             f"conf={pose['confidence']:.2f} | "
             f"XYZ mm=({pose['x_mm']:7.1f}, {pose['y_mm']:7.1f}, {pose['z_mm']:7.1f}) | "
             f"YAW={pose['yaw_deg']:7.2f} | "
-            f"area={pose['area_px']:.0f}"
+            f"axis={pose.get('color_axis', None)} | "
+            f"top={pose.get('top_color', None)}:{pose.get('top_side', None)} | "
+            f"score={pose.get('color_top_score', None)}"
         )
 
     print("\n[YOLO Class Index]")
@@ -5768,10 +7205,11 @@ def search_assembly(
             f"global {pose['global_idx']:02d} | "
             f"local {pose['local_id']:02d} | "
             f"{pose['class_name']:16s} | "
+            f"method={pose.get('pose_method', 'pca'):12s} | "
             f"conf={pose['confidence']:.2f} | "
             f"XYZ mm=({pose['x_mm']:7.1f}, {pose['y_mm']:7.1f}, {pose['z_mm']:7.1f}) | "
             f"YAW={pose['yaw_deg']:7.2f} | "
-            f"axis_dist={pose['optical_axis_dist_mm']:.1f}"
+            f"area={pose['area_px']:.0f}"
         )
 
     print("\n[YOLO Class Index]")
